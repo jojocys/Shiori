@@ -80,4 +80,18 @@ enum PlatformPickers {
         }
         return panel.runModal() == .OK ? panel.url : nil
     }
+
+    static func chooseImage(startingAt path: String?) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.image]
+        panel.prompt = "选择图标"
+        panel.message = "请选择一张图片作为游戏图标（PNG / JPG / ICNS 等）"
+        if let path, !path.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: path).deletingLastPathComponent()
+        }
+        return panel.runModal() == .OK ? panel.url : nil
+    }
 }

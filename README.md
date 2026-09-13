@@ -41,7 +41,7 @@ Shiori 不提供游戏本体、不提供破解、不提供 ROM、不提供 `prod
 
 ### 1. 安装 Shiori
 
-从 [GitHub Releases](https://github.com/jojocys/gal-for-MacOS/releases/latest) 下载 `Shiori.dmg`，打开后把 `Shiori.app` 拖到 `Applications`。App 在系统里会显示为 `栞 Shiori`。
+从 [GitHub Releases](https://github.com/jojocys/Shiori/releases/latest) 下载 `Shiori-<版本>.dmg`，打开后把 `Shiori.app` 拖到 `Applications`。App 在系统里会显示为 `栞 Shiori`。
 
 首次打开如果 macOS 提示“无法打开，因为无法验证开发者”，可以：
 
@@ -150,6 +150,7 @@ Shiori 会把配置和日志放在用户目录下。首次启动会尝试从旧�
 ```text
 ~/.shiori/
 ├── games.json        # 游戏配置
+├── games.backup.json # 游戏配置的本地恢复副本
 ├── logs/             # 启动日志
 ├── prefixes/         # Windows 游戏 Prefix
 ├── steam-prefix/     # Wine Steam 专用 Prefix
@@ -222,16 +223,63 @@ EMBED_EMULATOR_APP_PATH="/Applications/Ryujinx.app" \
 
 ```bash
 cd Shiori
-./scripts/make_dmg.sh
+VERSION="$(/usr/bin/plutil -extract version raw version.json)"
+DIST="dist"                             # 与上一步默认构建输出一致；自定义构建时替换
+./scripts/make_dmg.sh --app "$DIST/Shiori.app" --output "$DIST/Shiori-$VERSION.dmg"
 ```
 
 产物位于：
 
 ```text
 Shiori/dist/Shiori.app
-Shiori/dist/Shiori.app.zip
-Shiori/dist/Shiori.dmg
+Shiori/dist/Shiori-<版本>.dmg
+Shiori/dist/Shiori-<版本>.dmg.sha256.txt
 ```
+
+## 应用内更新（Sparkle 2）
+
+Shiori 使用 Sparkle 2 完成应用内检查、下载、签名验证、替换和重启：
+
+- GitHub Pages 固定提供 `https://jojocys.github.io/Shiori/appcast.xml`。
+- GitHub Releases 托管版本化 `Shiori-<版本>.dmg` 及对应 `.sha256.txt`；本阶段不发布 ZIP 或 delta 更新。
+- 更新包使用 Sparkle Ed25519 签名；私钥只保存在维护者钥匙串或 CI Secret，仓库仅保存公钥。
+- 首次安装仍使用 DMG；安装过带 Sparkle 的版本后，可从 App 菜单或标题栏的下载图标检查更新。
+- 标题栏的语言菜单可在简体中文和 English 之间实时切换，并保存用户选择。
+
+发布新版本时，使用 `release.py` 的分阶段入口。`prepare` 只在本地构建并生成隔离 staging；`publish` 才会创建/更新 GitHub Release、上传并匿名验证资产，并把验证后的 feed 写入本地 `docs/appcast.xml`。`publish` 不会自动提交、推送或部署 Pages。
+
+1. 更新 `Shiori/version.json` 的 `version` 与递增的 `build`。
+2. 编写仓库根目录的 `Shiori-<版本>-变更说明.md`。
+3. 从预期的干净源码提交运行 `prepare`，它会构建 App、制作 DMG、生成签名 staged feed，并写入 `Shiori/dist/releases/<版本>/release.json`。
+4. 复核 staging 后运行 `publish`；它按“Release 资产先验证、feed 后提升”的顺序工作。
+5. 提交并推送 `docs/appcast.xml`，等待 Pages workflow 完成，再用公网地址执行 `verify-online`。
+
+```bash
+cd Shiori
+STAGE="dist/releases/0.2.1"  # 替换为本次实际 staging 路径
+BUILD="3"                    # 替换为本次实际 build
+# 默认流程：已有生产 feed 时不设置 SHIORI_FIRST_FEED
+./scripts/release.sh prepare
+./scripts/release.sh publish "$STAGE"
+# publish 只更新本地 docs/appcast.xml；人工复核后提交并推送该文件，等待 Pages workflow 成功
+# Pages 部署完成后再执行公网验证：
+./scripts/release.sh verify-online "$STAGE/appcast.xml" --public-feed --build "$BUILD"
+```
+
+首次 feed 模式单独执行：仅在确认生产 feed 尚不存在时，将上面的 `prepare` 替换为 `SHIORI_FIRST_FEED=1 ./scripts/release.sh prepare`。
+
+已有生产 feed 时不要设置 `SHIORI_FIRST_FEED=1`；`prepare` 会读取并保留历史条目。示例中的 `STAGE` 和 `BUILD` 必须替换为实际值，不能把尖括号占位符直接复制到命令行。`publish` 后需要人工检查差异、提交 `docs/appcast.xml` 并推送，Pages 部署成功后再次执行 `verify-online`。发布脚本会拒绝未提交的实现/脚本/配置等范围变更、来源提交不一致、额外 Release 安装包及字节不一致的远端资产。
+
+`generate_appcast.sh` 默认从登录钥匙串读取账户 `shiori-jojocys` 的 Sparkle 私钥。CI 中可通过 `SPARKLE_PRIVATE_KEY_FILE` 指定临时私钥文件；不要把私钥提交到 Git。
+
+当前发布脚本默认使用 ad-hoc 签名；这不等同于 Developer ID、公证或 Gatekeeper 放行。正式 Developer ID 发布时设置签名身份：
+
+```bash
+SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+./scripts/build_release_app.sh
+```
+
+仓库已包含 GitHub Pages workflow。首次使用前，需要在 GitHub 仓库 Settings → Pages 中将 Source 设为 **GitHub Actions**。
 
 ## 项目结构
 
@@ -245,13 +293,20 @@ Shiori/
 │   ├── RuntimeManager.swift    # Wine / XQuartz / Rosetta / Gatekeeper 检测
 │   ├── RuntimeInstaller.swift  # 安装包下载辅助
 │   ├── SwitchRuntime.swift     # Switch 模拟器数据目录准备
-│   └── UpdateChecker.swift     # GitHub 版本检查
+│   ├── UpdateChecker.swift     # App 品牌与运行版本信息
+│   └── ShioriUpdater.swift     # Sparkle 应用内更新控制器
 ├── assets/                     # App 图标资源
 ├── scripts/
 │   ├── build_release_app.sh    # 构建 Shiori.app
-│   ├── make_dmg.sh             # 构建 Shiori.dmg
+│   ├── make_dmg.sh             # 构建版本化 Shiori-<版本>.dmg
+│   ├── generate_appcast.sh     # 签署更新并生成无 delta 的 appcast
+│   ├── release.py              # prepare/publish/online 发布门禁
+│   ├── release.sh              # release.py 命令包装器
+│   ├── verify_update_setup.sh  # 验证发布包内的 Sparkle 配置
 │   └── generate_app_icon.sh    # 生成 icns
-└── version.json                # 更新检查使用的版本清单
+├── config/
+│   └── sparkle_public_key.txt  # 可公开的更新验证公钥
+└── version.json                # 发布版本号、构建号与兼容旧版的更新清单
 ```
 
 ## 常见问题

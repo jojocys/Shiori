@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 // MARK: - UI model helpers
@@ -9,7 +10,7 @@ enum AppearancePreference: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    var title: String {
+    var title: LocalizedStringKey {
         switch self {
         case .system: return "跟随系统"
         case .light: return "浅色"
@@ -34,6 +35,23 @@ enum AppearancePreference: String, CaseIterable, Identifiable {
     }
 }
 
+/// 界面语言偏好。默认使用中文，并随用户选择持久化。
+enum AppLanguage: String, CaseIterable, Identifiable {
+    case simplifiedChinese = "zh-Hans"
+    case english = "en"
+
+    var id: String { rawValue }
+
+    var title: LocalizedStringKey {
+        switch self {
+        case .simplifiedChinese: return "简体中文"
+        case .english: return "English"
+        }
+    }
+
+    var locale: Locale { Locale(identifier: rawValue) }
+}
+
 /// 侧栏顶层入口：Shiori 主页（配置选择）/ Wine Steam / 单个游戏。
 enum SidebarItem: Hashable {
     case home
@@ -48,7 +66,7 @@ enum GameSection: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    var title: String {
+    var title: LocalizedStringKey {
         switch self {
         case .setup: return "游戏设置"
         case .runtime: return "运行环境"
@@ -63,16 +81,52 @@ enum GameSection: String, CaseIterable, Identifiable {
     }
 }
 
+/// 测量侧栏宽度，用于图标随侧栏等比例缩放。
+private struct SidebarWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 264
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 struct RootView: View {
     @ObservedObject var store: AppStore
+    let checkForUpdates: () -> Void
+    var canCheckForUpdates: Bool = true
 
     @AppStorage("ui.appearance") private var appearanceRaw = AppearancePreference.system.rawValue
+    @AppStorage("ui.language") private var languageRaw = AppLanguage.simplifiedChinese.rawValue
+    @AppStorage("icon.onlineFetch") private var onlineFetchIcons = true
     @State private var sidebarSelection: SidebarItem?
     @State private var gameSection: GameSection = .setup
     @State private var showDeleteConfirm = false
+    @State private var pendingWineSteamDelete: SteamLibraryGame?
+    @State private var pendingMacSteamReimport: SteamLibraryGame?
+    @State private var coverPreviewGame: GameEntry?
+    @State private var sidebarWidth: CGFloat = 264
+    @State private var isUpdateButtonHovered = false
+    private let steamRefreshTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
     private var appearance: AppearancePreference {
         AppearancePreference(rawValue: appearanceRaw) ?? .system
+    }
+
+    private var language: AppLanguage {
+        AppLanguage(rawValue: languageRaw) ?? .simplifiedChinese
+    }
+
+    /// 将运行时 String（状态、三元表达式和复用组件参数）按当前界面语言查表。
+    /// SwiftUI 的字符串字面量由 locale 环境自动处理，这里补足无法自动推断为
+    /// LocalizedStringKey 的文本。
+    private func localized(_ key: String) -> String {
+        guard language == .english,
+              let path = Bundle.main.path(forResource: "en", ofType: "lproj"),
+              let bundle = Bundle(path: path)
+        else { return key }
+        return NSLocalizedString(key, bundle: bundle, value: key, comment: "")
+    }
+
+    /// 侧栏图标宽度随侧栏宽度等比例缩放（拖宽侧栏 → 图标变大）。1:1 正方 + 填充裁切。
+    private var sidebarIconWidth: CGFloat {
+        min(max(sidebarWidth * 0.15, 40), 56)
     }
 
     var body: some View {
@@ -84,6 +138,7 @@ struct RootView: View {
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 1120, minHeight: 720)
         .preferredColorScheme(appearance.colorScheme)
+        .environment(\.locale, language.locale)
         .toolbar { toolbarContent }
         .confirmationDialog("删除当前配置？", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("删除", role: .destructive) { store.removeSelectedGame() }
@@ -91,14 +146,52 @@ struct RootView: View {
         } message: {
             Text("只删除配置记录，不删除游戏文件。")
         }
+        .confirmationDialog("删除 Wine Steam 游戏文件？", isPresented: wineSteamDeleteBinding, titleVisibility: .visible) {
+            if let game = pendingWineSteamDelete {
+                Button("删除文件", role: .destructive) {
+                    store.deleteWineSteamGame(game)
+                    pendingWineSteamDelete = nil
+                }
+            }
+            Button("取消", role: .cancel) { pendingWineSteamDelete = nil }
+        } message: {
+            if let game = pendingWineSteamDelete {
+                Text("将删除 \(game.name) 的 Wine Steam manifest、安装目录、下载缓存和对应创意工坊内容。Mac Steam 原文件不会被删除。")
+            }
+        }
+        .confirmationDialog("删除 Wine 侧并重新预填充？", isPresented: macSteamReimportBinding, titleVisibility: .visible) {
+            if let game = pendingMacSteamReimport {
+                Button("删除并重新预填充", role: .destructive) {
+                    store.resetWineSteamGameAndPrefill(game)
+                    pendingMacSteamReimport = nil
+                }
+            }
+            Button("取消", role: .cancel) { pendingMacSteamReimport = nil }
+        } message: {
+            if let game = pendingMacSteamReimport {
+                Text("会先结束 Wine Steam，删除 \(game.name) 在 Wine Steam 里的 manifest、安装目录、下载缓存和相关缓存，然后只从 Mac Steam 本地复制可复用文件。Mac Steam 原文件不会被删除。")
+            }
+        }
+        .sheet(item: $coverPreviewGame) { game in
+            coverPreview(game)
+        }
         .onAppear(perform: syncInitialSelection)
-        .task { await store.checkForUpdates() }
+        .onChange(of: sidebarSelection) { selection in
+            if selection == .home || selection == .steam {
+                store.refreshSteamLibraries()
+            }
+        }
         .onChange(of: store.selectedGameID) { newID in
             // 列表变化（如删除）后保持侧栏与 store 同步，但不打断 Steam 视图。
             if case .game = sidebarSelection {
                 sidebarSelection = newID.map(SidebarItem.game)
             } else if sidebarSelection == nil {
                 sidebarSelection = newID.map(SidebarItem.game)
+            }
+        }
+        .onReceive(steamRefreshTimer) { _ in
+            if sidebarSelection == .home || sidebarSelection == .steam {
+                store.refreshSteamLibraries()
             }
         }
     }
@@ -109,19 +202,54 @@ struct RootView: View {
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
             Button {
-                createAndOpenGame()
+                checkForUpdates()
             } label: {
-                Image(systemName: "plus")
+                HStack(spacing: isUpdateButtonHovered ? 5 : 0) {
+                    Image(systemName: isUpdateButtonHovered ? "arrow.down.circle.fill" : "arrow.down.circle")
+                        .scaleEffect(isUpdateButtonHovered ? 1.06 : 1)
+
+                    if isUpdateButtonHovered {
+                        Text("更新")
+                            .fixedSize()
+                            .transition(.opacity.combined(with: .move(edge: .trailing)))
+                    }
+                }
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(isUpdateButtonHovered ? Color.accentColor : Color.secondary)
+                    .frame(height: 26)
+                    .padding(.horizontal, isUpdateButtonHovered ? 8 : 4)
+                    .contentShape(Capsule())
+                    .animation(.easeInOut(duration: 0.18), value: isUpdateButtonHovered)
             }
-            .help("新建配置")
+            .buttonStyle(.plain)
+            .background(Capsule().fill(Color.clear))
+            .onHover { hovering in
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isUpdateButtonHovered = hovering
+                }
+            }
+            .opacity(canCheckForUpdates ? 1 : 0.45)
+            .disabled(!canCheckForUpdates)
+            .help("检查并安装 Shiori 更新")
 
             Button {
-                store.load()
-                store.refreshRuntimeStatus()
+                refreshAllUserData()
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
             .help("刷新")
+
+            Menu {
+                Picker("语言", selection: $languageRaw) {
+                    ForEach(AppLanguage.allCases) { language in
+                        Text(language.title).tag(language.rawValue)
+                    }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Image(systemName: "globe")
+            }
+            .help("语言")
 
             Menu {
                 Picker("外观", selection: $appearanceRaw) {
@@ -130,10 +258,12 @@ struct RootView: View {
                     }
                 }
                 .pickerStyle(.inline)
+                Divider()
+                Toggle("在线获取游戏封面", isOn: $onlineFetchIcons)
             } label: {
                 Image(systemName: appearance.symbol)
             }
-            .help("浅色 / 深色主题")
+            .help("浅色 / 深色主题 · 在线封面")
         }
     }
 
@@ -142,10 +272,6 @@ struct RootView: View {
     private var sidebar: some View {
         VStack(spacing: 0) {
             brandHeader
-
-            if store.updateState.isAvailable {
-                updateBanner
-            }
 
             List(selection: sidebarBinding) {
                 Section {
@@ -164,6 +290,12 @@ struct RootView: View {
             sidebarFooter
         }
         .frame(minWidth: 264)
+        .background(
+            GeometryReader { geo in
+                Color.clear.preference(key: SidebarWidthKey.self, value: geo.size.width)
+            }
+        )
+        .onPreferenceChange(SidebarWidthKey.self) { sidebarWidth = $0 }
     }
 
     private var brandHeader: some View {
@@ -208,7 +340,9 @@ struct RootView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Wine Steam")
                     .font(.headline)
-                Text("独立客户端入口")
+                Text(localized(store.wineSteamGames.isEmpty
+                     ? "独立客户端入口"
+                     : "\(store.wineSteamGames.count) 个游戏 · 独立入口"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -217,10 +351,8 @@ struct RootView: View {
     }
 
     private func gameRow(_ game: GameEntry) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: "puzzlepiece.fill")
-                .foregroundStyle(.secondary)
-                .frame(width: 18)
+        HStack(spacing: 11) {
+            GameIconView(game: game, size: sidebarIconWidth, cornerRadius: max(6, sidebarIconWidth * 0.2), style: .fillCrop)
             VStack(alignment: .leading, spacing: 2) {
                 Text(game.name)
                     .font(.body.weight(.medium))
@@ -233,7 +365,7 @@ struct RootView: View {
             Spacer(minLength: 4)
             platformBadge(game.platform)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 6)
     }
 
     private var sidebarFooter: some View {
@@ -242,58 +374,37 @@ struct RootView: View {
                 createAndOpenGame()
             } label: {
                 Label("新建配置", systemImage: "plus")
+                    .font(.headline.weight(.semibold))
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
+            .tint(.blue)
             .controlSize(.large)
 
             HStack {
-                Text("共 \(store.games.count) 个配置 · v\(AppInfo.version)")
+                Text(language == .english
+                     ? "\(store.games.count) configurations · v\(AppInfo.version)"
+                     : "共 \(store.games.count) 个配置 · v\(AppInfo.version)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("刷新") {
-                    store.load()
-                    store.refreshRuntimeStatus()
+                    refreshAllUserData()
                 }
                 .buttonStyle(.borderless)
                 .font(.caption)
             }
         }
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
     }
 
-    private var updateBanner: some View {
-        Button {
-            store.openReleasesPage()
-        } label: {
-            HStack(spacing: 9) {
-                Image(systemName: "arrow.down.circle.fill")
-                    .foregroundStyle(.tint)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("有新版本 \(store.updateState.latestVersion)")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.primary)
-                    Text("点击前往下载")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(10)
-            .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.accentColor.opacity(0.14))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Color.accentColor.opacity(0.35), lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 12)
-        .padding(.bottom, 8)
+    /// 顶部与侧栏的全局刷新必须覆盖主页中展示的全部数据，包括 Wine Steam 新安装游戏。
+    private func refreshAllUserData() {
+        store.load()
+        store.refreshRuntimeStatus()
+        store.refreshSteamLibraries(userInitiated: true)
     }
 
     // MARK: Detail switch
@@ -316,98 +427,264 @@ struct RootView: View {
 
     private var homeDetail: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .top, spacing: 16) {
-                Spacer()
-                Button {
-                    createAndOpenGame()
-                } label: {
-                    Label("新建配置", systemImage: "plus")
-                        .font(.title3.weight(.semibold))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-            }
-            .padding(.horizontal, 24)
-            .padding(.top, 20)
-            .padding(.bottom, 16)
-
-            Divider()
-
             ScrollView {
-                if store.games.isEmpty {
-                    VStack(spacing: 12) {
-                        Image(systemName: "tray")
-                            .font(.system(size: 40))
-                            .foregroundStyle(.secondary)
-                        Text("还没有任何游戏配置")
-                            .foregroundStyle(.secondary)
-                        Button {
+                VStack(alignment: .leading, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        homeSectionHeader(
+                            "我的游戏",
+                            count: store.games.count,
+                            systemImage: "square.grid.2x2",
+                            actionTitle: "新建配置"
+                        ) {
                             createAndOpenGame()
-                        } label: {
-                            Label("新建配置", systemImage: "plus")
                         }
-                        .buttonStyle(.borderedProminent)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 360)
-                } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 250), spacing: 16)], spacing: 16) {
-                        ForEach(store.games) { game in
-                            gameCard(game)
+                        if store.games.isEmpty {
+                            emptyConfigInline
+                        } else {
+                            LazyVGrid(columns: homeGridColumns, spacing: 16) {
+                                ForEach(store.games) { game in
+                                    gameCard(game)
+                                }
+                            }
                         }
                     }
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 20)
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        homeWineSteamSectionHeader
+                        if store.wineSteamGames.isEmpty {
+                            HStack(spacing: 10) {
+                                Image(systemName: "tray")
+                                    .foregroundStyle(.secondary)
+                                Text("尚未发现 Wine Steam 本地游戏")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                            }
+                            .padding(12)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .fill(Color.primary.opacity(0.04))
+                            )
+                        } else {
+                            LazyVGrid(columns: homeGridColumns, spacing: 16) {
+                                ForEach(store.wineSteamGames) { game in
+                                    steamGameCard(game)
+                                }
+                            }
+                        }
+                    }
                 }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 20)
             }
 
             statusBar
         }
     }
 
-    private func gameCard(_ game: GameEntry) -> some View {
-        Button {
-            openGame(game.id)
-        } label: {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Image(systemName: "puzzlepiece.fill")
-                        .foregroundStyle(.tint)
-                    Spacer()
-                    platformBadge(game.platform)
+    /// 固定一行 4 列、等宽 → 每张卡片一致，随窗口宽度整体等比缩放。
+    private var homeGridColumns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: 16), count: 4)
+    }
+
+    private var emptyConfigInline: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "tray")
+                .foregroundStyle(.secondary)
+            Text("还没有手动添加的游戏配置")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.primary.opacity(0.04))
+        )
+    }
+
+    private func homeSectionHeader(
+        _ title: LocalizedStringKey,
+        count: Int,
+        systemImage: String,
+        actionTitle: LocalizedStringKey = "管理",
+        action: (() -> Void)? = nil
+    ) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .foregroundStyle(.tint)
+            Text(title)
+                .font(.title3.weight(.semibold))
+            Text("\(count)")
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.primary.opacity(0.08)))
+                .foregroundStyle(.secondary)
+            Spacer()
+            if let action {
+                Button(action: action) {
+                    Label(actionTitle, systemImage: "plus")
+                        .font(.headline.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
                 }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                .controlSize(.large)
+            }
+        }
+        .frame(minHeight: 58)
+    }
+
+    private var homeWineSteamSectionHeader: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "s.circle.fill")
+                .foregroundStyle(.tint)
+            Text("Wine Steam 游戏")
+                .font(.title3.weight(.semibold))
+            Text("\(store.wineSteamGames.count)")
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.primary.opacity(0.08)))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button {
+                openAndLaunchWineSteam()
+            } label: {
+                Label("启动 Steam 客户端", systemImage: "play.fill")
+                    .font(.headline.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.green)
+            .controlSize(.large)
+        }
+        .frame(minHeight: 58)
+    }
+
+    private func gameCard(_ game: GameEntry) -> some View {
+        let configured = isConfigured(game)
+        return VStack(alignment: .leading, spacing: 0) {
+            Button {
+                openGame(game.id)
+            } label: {
+                VStack(alignment: .leading, spacing: 0) {
+                    // 主卡片点击进入对应配置详情；启动键是独立操作，不会改变当前配置页。
+                    Color.clear
+                        .aspectRatio(3.0 / 4.0, contentMode: .fit)
+                        .overlay(GameIconView(game: game, cornerRadius: 0))
+                        .overlay(alignment: .topTrailing) {
+                            platformBadge(game.platform).padding(8)
+                        }
+                        .clipped()
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(game.name)
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Text(game.displaySubtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        HStack {
+                            Text(localized(configured ? "已配置" : "未配置"))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.top, 14)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                store.startGame(game)
+            } label: {
+                Label(localized(configured ? "启动" : "请先完成配置"), systemImage: configured ? "play.fill" : "gearshape")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(configured ? .green : .secondary)
+            .controlSize(.small)
+            .disabled(!configured)
+            .help(configured ? "直接启动该游戏" : "点击卡片进入配置页并完成设置")
+            .padding(14)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    /// 主页的 Wine Steam 游戏卡片：与配置卡片同构，但主操作是启动（或安装/验证）。
+    private func steamGameCard(_ game: SteamLibraryGame) -> some View {
+        let readyToLaunch = store.isWineSteamGameReadyToLaunch(game)
+        let isLaunching = store.isLaunchingWineSteamGame(game)
+        return VStack(alignment: .leading, spacing: 0) {
+            Color.clear
+                .aspectRatio(3.0 / 4.0, contentMode: .fit)
+                .overlay(SteamGameIconView(game: game, cornerRadius: 0))
+                .overlay(alignment: .topTrailing) {
+                    steamPill(game.sourceLabel, color: game.isPreloadOnly ? .orange : .green).padding(8)
+                }
+                .clipped()
+            VStack(alignment: .leading, spacing: 8) {
                 Text(game.name)
                     .font(.headline)
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                Text(game.displaySubtitle)
+                Text(game.sizeLabel)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                HStack {
-                    Text(isConfigured(game) ? "已配置" : "未配置")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                Button {
+                    store.launchWineSteamGame(game)
+                } label: {
+                    Label(
+                        localized(isLaunching ? "启动中…" : (readyToLaunch ? "启动" : "安装/验证")),
+                        systemImage: isLaunching ? "hourglass" : (readyToLaunch ? "play.fill" : "checkmark.arrow.trianglehead.counterclockwise")
+                    )
+                        .frame(maxWidth: .infinity)
                 }
+                .buttonStyle(.borderedProminent)
+                .tint(readyToLaunch ? .green : .orange)
+                .controlSize(.small)
+                .disabled(isLaunching)
+                .help(readyToLaunch ? "通过 Wine Steam 启动该游戏" : "打开 Wine Steam 安装/验证，只复用校验通过的文件")
             }
             .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color.primary.opacity(0.07), lineWidth: 1)
-            )
         }
-        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    /// 大图预览：点击配置内的图标弹出，原图完整显示 + 全屏模糊压暗底。
+    private func coverPreview(_ game: GameEntry) -> some View {
+        GameCoverPreview(game: game) { coverPreviewGame = nil }
     }
 
     // MARK: Game detail
@@ -446,8 +723,17 @@ struct RootView: View {
     private var gameHeader: some View {
         let game = store.selectedGame
         return HStack(alignment: .top, spacing: 16) {
+            if let game {
+                Button {
+                    coverPreviewGame = game
+                } label: {
+                    GameIconView(game: game, size: 100, height: 132, cornerRadius: 14)
+                }
+                .buttonStyle(.plain)
+                .help("点击查看大图")
+            }
             VStack(alignment: .leading, spacing: 8) {
-                Text(game?.name ?? "未选择")
+                Text(game?.name ?? localized("未选择"))
                     .font(.system(size: 28, weight: .bold))
                     .lineLimit(1)
 
@@ -493,6 +779,7 @@ struct RootView: View {
                         .padding(.vertical, 4)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(.green)
                 .controlSize(.large)
                 .keyboardShortcut(.return, modifiers: [.command])
                 .disabled(game == nil)
@@ -519,7 +806,7 @@ struct RootView: View {
                     } label: {
                         Label("删除配置", systemImage: "trash")
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.borderedProminent)
                     .tint(.red)
                     .controlSize(.small)
                     .disabled(game == nil)
@@ -591,6 +878,54 @@ struct RootView: View {
                             .lineLimit(2)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
+
+                    labeledField("图标") {
+                        HStack(spacing: 12) {
+                            if let game = store.selectedGame {
+                                Button {
+                                    coverPreviewGame = game
+                                } label: {
+                                    GameIconView(game: game, size: 60, height: 84, cornerRadius: 12)
+                                }
+                                .buttonStyle(.plain)
+                                .help("点击查看大图")
+                            }
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(store.selectedGameHasCustomIcon
+                                     ? "使用自定义图标"
+                                     : "自动：在线封面(Steam/VNDB) → EXE 内嵌图标 → 目录图片 → 默认符号")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                HStack(spacing: 8) {
+                                    Button {
+                                        store.chooseCustomIconForSelectedGame()
+                                    } label: {
+                                        Label("选择图标", systemImage: "photo")
+                                    }
+                                    .controlSize(.small)
+
+                                    Button {
+                                        store.refetchIconForSelectedGame()
+                                    } label: {
+                                        Label("重新获取封面", systemImage: "arrow.down.circle")
+                                    }
+                                    .controlSize(.small)
+                                    .disabled(store.selectedGameHasCustomIcon)
+                                    .help("清掉缓存，重新从 Steam/VNDB 抓取游戏封面")
+
+                                    Button {
+                                        store.clearCustomIconForSelectedGame()
+                                    } label: {
+                                        Label("恢复默认", systemImage: "arrow.uturn.backward")
+                                    }
+                                    .controlSize(.small)
+                                    .disabled(!store.selectedGameHasCustomIcon)
+                                }
+                            }
+                            Spacer(minLength: 0)
+                        }
+                    }
                 }
             }
 
@@ -642,6 +977,18 @@ struct RootView: View {
                             Button("选择") { store.choosePrefixFolder() }
                                 .controlSize(.small)
                         }
+                        pathRow(title: "Wine C 盘", value: store.selectedGameWineDriveStatus) {
+                            Button {
+                                store.copySelectedGameToWineDrive()
+                            } label: {
+                                Label("复制到 C 盘", systemImage: "internaldrive")
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.blue)
+                            .controlSize(.small)
+                            .disabled(!store.canCopySelectedGameToWineDrive)
+                            .help("复制为 Prefix 内的真实目录，减少 Z: 路径和符号链接问题")
+                        }
                     }
 
                     Button {
@@ -650,6 +997,7 @@ struct RootView: View {
                         Label("保存到游戏列表", systemImage: "square.and.arrow.down")
                     }
                     .buttonStyle(.bordered)
+                    .tint(.blue)
                     .padding(.top, 2)
                 }
             }
@@ -782,6 +1130,7 @@ struct RootView: View {
                             Label("安装内置 XQuartz", systemImage: "arrow.down.app")
                         }
                         .buttonStyle(.bordered)
+                        .tint(.blue)
 
                         Button {
                             store.openPrivacySettings()
@@ -789,6 +1138,7 @@ struct RootView: View {
                             Label("隐私与安全性", systemImage: "lock.shield")
                         }
                         .buttonStyle(.bordered)
+                        .tint(.orange)
 
                         Button {
                             store.openRepairGuide()
@@ -796,7 +1146,57 @@ struct RootView: View {
                             Label("一键修复引导", systemImage: "wand.and.stars")
                         }
                         .buttonStyle(.bordered)
+                        .tint(.blue)
                     }
+                }
+            }
+
+            card {
+                VStack(alignment: .leading, spacing: 12) {
+                    sectionTitle(
+                        "中日文字体兼容",
+                        subtitle: "修复 Windows 原生菜单、对话框和设置窗口中的方块字；仅修改当前游戏的 Wine Prefix。"
+                    )
+
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: store.selectedGameHasFontCompatibilityRepair
+                              ? "checkmark.circle.fill"
+                              : "textformat")
+                            .foregroundStyle(store.selectedGameHasFontCompatibilityRepair ? Color.green : Color.secondary)
+                            .padding(.top, 2)
+                        Text(store.fontCompatibilityStatusText)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 8)
+                        if store.isManagingFontCompatibility {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+
+                    HStack(spacing: 10) {
+                        Button {
+                            store.repairSelectedGameFonts()
+                        } label: {
+                            Label("检测并修复中日字体", systemImage: "character.book.closed")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.blue)
+                        .disabled(store.isManagingFontCompatibility)
+
+                        Button(role: .destructive) {
+                            store.restoreSelectedGameFonts()
+                        } label: {
+                            Label("撤销字体修复", systemImage: "arrow.uturn.backward")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(store.isManagingFontCompatibility || !store.selectedGameHasFontCompatibilityRepair)
+                    }
+
+                    Text("Shiori 使用当前实际 Wine 写入字体别名，不下载或分发 Microsoft 字体；已有自定义映射不会被覆盖。修复后请完全退出并重新打开游戏。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -940,13 +1340,20 @@ struct RootView: View {
                 Button {
                     store.launchWineSteamEntry()
                 } label: {
-                    Label("启动 Steam 客户端", systemImage: "play.fill")
+                    Label(
+                        localized(store.isWineSteamRunning ? "唤起 Steam 窗口" : "启动 Steam 客户端"),
+                        systemImage: store.isWineSteamRunning ? "macwindow.on.rectangle" : "play.fill"
+                    )
                         .font(.title3.weight(.semibold))
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(store.isWineSteamRunning ? .blue : .green)
                 .controlSize(.large)
+                .help(store.isWineSteamRunning
+                      ? "Wine Steam 已在运行。Shiori 会在点击 Wine 程序坞图标时尝试唤起主窗口；如未生效，可用这里手动唤起。"
+                      : "启动 Wine Steam 客户端")
             }
             .padding(.horizontal, 24)
             .padding(.top, 20)
@@ -966,6 +1373,7 @@ struct RootView: View {
                                     Label("下载 Wine Steam", systemImage: "arrow.down.circle")
                                 }
                                 .buttonStyle(.bordered)
+                                .tint(.blue)
                                 .disabled(store.isDownloadingInstaller)
 
                                 if store.isDownloadingInstaller {
@@ -979,7 +1387,7 @@ struct RootView: View {
                                 } label: {
                                     Label("结束进程", systemImage: "power")
                                 }
-                                .buttonStyle(.bordered)
+                                .buttonStyle(.borderedProminent)
                                 .tint(.red)
                                 .controlSize(.small)
                             }
@@ -989,6 +1397,68 @@ struct RootView: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
+                            }
+
+                            Divider()
+
+                            Label {
+                                Text("Wine Steam 会在程序坞占两个图标（Steam 本体 + 内置浏览器进程），这是 Wine 的 macOS 驱动给每个有窗口的进程各建一个图标造成的。关掉 Steam 主窗口后，点击当前客户端的任一 Wine 图标时 Shiori 会尝试让 Steam 重建窗口；如果 macOS 没有产生新的激活事件，仍可使用上方的「唤起 Steam 窗口」。")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } icon: {
+                                Image(systemName: "info.circle")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+
+                    card {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack(alignment: .top) {
+                                sectionTitle("Wine Steam 游戏", subtitle: store.wineSteamLibraryPath)
+                                Spacer()
+                                Button {
+                                    store.refreshSteamLibraries(userInitiated: true)
+                                } label: {
+                                    Label("刷新", systemImage: "arrow.clockwise")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+
+                            if store.wineSteamGames.isEmpty {
+                                emptySteamState("尚未发现 Wine Steam 本地游戏")
+                            } else {
+                                ForEach(store.wineSteamGames) { game in
+                                    wineSteamGameRow(game)
+                                }
+                            }
+                        }
+                    }
+
+                    card {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack(alignment: .top) {
+                                sectionTitle("从 Mac Steam 导入", subtitle: store.steamLibraryStatusText)
+                                Spacer()
+                                if store.isSteamPrefillImporting {
+                                    ProgressView().controlSize(.small)
+                                }
+                            }
+
+                            VStack(alignment: .leading, spacing: 6) {
+                                explainLine("可导入的是本地资源/数据文件，例如 Unity Data、Ren'Py game/www、pak、assets、resource、音频、图片等。")
+                                explainLine("不会导入 Mac 专用内容：.app、.dylib、.framework、Info.plist、Mac Steam appmanifest。")
+                                explainLine("导入后仍需点“安装/验证”；Shiori 会写入 Wine 待验证 manifest 和 staging 目录，Steam 只复用通过 Windows manifest 校验的文件。")
+                            }
+
+                            if store.macSteamGames.isEmpty {
+                                emptySteamState("未发现 Mac Steam 已安装游戏")
+                            } else {
+                                ForEach(store.macSteamGames) { game in
+                                    macSteamGameRow(game)
+                                }
                             }
                         }
                     }
@@ -1003,6 +1473,7 @@ struct RootView: View {
                                     Label("安装内置 XQuartz", systemImage: "arrow.down.app")
                                 }
                                 .buttonStyle(.bordered)
+                                .tint(.blue)
 
                                 Button {
                                     store.openPrivacySettings()
@@ -1010,6 +1481,7 @@ struct RootView: View {
                                     Label("隐私与安全性", systemImage: "lock.shield")
                                 }
                                 .buttonStyle(.bordered)
+                                .tint(.orange)
                             }
                         }
                     }
@@ -1040,6 +1512,226 @@ struct RootView: View {
         }
     }
 
+    private func macSteamGameRow(_ game: SteamLibraryGame) -> some View {
+        let installStatus = store.wineSteamInstallStatus(for: game)
+        let wineEntry = store.wineSteamGames.first { $0.appID == game.appID && $0.hasManifest }
+        let readyInWine = wineEntry.map { store.isWineSteamGameReadyToLaunch($0) } ?? false
+        let pendingValidation = installStatus?.prefillMetadata != nil && !readyInWine
+        let prefilledInWine = pendingValidation || store.isMacSteamGamePrefilledInWine(game)
+        let hasWineSideEntry = wineEntry != nil || prefilledInWine || installStatus != nil
+        return HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "shippingbox")
+                .foregroundStyle(.blue)
+                .frame(width: 18)
+                .padding(.top, 3)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(game.name)
+                        .font(.callout.weight(.semibold))
+                        .lineLimit(1)
+                    steamPill(game.sizeLabel, color: .secondary)
+                    if readyInWine {
+                        steamPill("Wine 已安装", color: .green)
+                    } else if pendingValidation {
+                        steamPill("待验证", color: .orange)
+                    } else if prefilledInWine {
+                        steamPill("已预填充", color: .orange)
+                    }
+                }
+                Text("AppID \(game.appID) · \(game.installDir)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(game.installPath)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if let installStatus {
+                    steamInstallStatusBlock(installStatus, game: game)
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            VStack(alignment: .trailing, spacing: 6) {
+                if prefilledInWine && !readyInWine {
+                    Button {
+                        store.launchWineSteamInstall(for: game)
+                    } label: {
+                        Label("安装/验证", systemImage: "checkmark.arrow.trianglehead.counterclockwise")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+                    .controlSize(.small)
+                    .help("打开 Wine Steam 安装入口；Steam 只复用校验通过的文件，其余仍会下载")
+                } else if !readyInWine {
+                    Button {
+                        store.prefillMacSteamGameToWine(game)
+                    } label: {
+                        Label("预填充", systemImage: "square.and.arrow.down")
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.blue)
+                    .controlSize(.small)
+                    .disabled(!store.canPrefillMacSteamGame(game))
+                    .help("离线复制可能复用的资源/数据文件；跳过 Mac 专用文件和 appmanifest")
+                }
+
+                if hasWineSideEntry {
+                    Button(role: .destructive) {
+                        pendingMacSteamReimport = game
+                    } label: {
+                        Label("重新预填充", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .controlSize(.small)
+                    .disabled(!store.canResetWineSteamGameAndPrefill(game))
+                    .help("先删除 Wine Steam 侧该游戏文件，再从 Mac Steam 本地重新预填充")
+                }
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.primary.opacity(0.04))
+        )
+    }
+
+    private func wineSteamGameRow(_ game: SteamLibraryGame) -> some View {
+        let installStatus = store.wineSteamInstallStatus(for: game)
+        let readyToLaunch = store.isWineSteamGameReadyToLaunch(game)
+        let isLaunching = store.isLaunchingWineSteamGame(game)
+        return HStack(alignment: .top, spacing: 12) {
+            SteamGameIconView(game: game, size: 48, height: 66, cornerRadius: 10)
+                .padding(.top, 1)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(game.name)
+                        .font(.callout.weight(.semibold))
+                        .lineLimit(1)
+                    steamPill(game.sourceLabel, color: game.isPreloadOnly ? .orange : .green)
+                    steamPill(game.sizeLabel, color: .secondary)
+                }
+                Text(game.appID.isEmpty ? game.installDir : "AppID \(game.appID) · \(game.installDir)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(game.installPath)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if let installStatus {
+                    steamInstallStatusBlock(installStatus, game: game)
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            VStack(alignment: .trailing, spacing: 6) {
+                Button {
+                    store.launchWineSteamGame(game)
+                } label: {
+                    Label(
+                        localized(isLaunching ? "启动中…" : (readyToLaunch ? "启动" : "安装/验证")),
+                        systemImage: isLaunching ? "hourglass" : (readyToLaunch ? "play.fill" : "checkmark.arrow.trianglehead.counterclockwise")
+                    )
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(readyToLaunch ? .green : .orange)
+                .controlSize(.small)
+                .disabled(isLaunching)
+                .help(readyToLaunch ? "通过 Wine Steam 启动该游戏" : "打开 Wine Steam 安装/验证，只复用校验通过的文件")
+
+                HStack(spacing: 8) {
+                    Button {
+                        store.openWineSteamGameFolder(game)
+                    } label: {
+                        Label("目录", systemImage: "folder")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button(role: .destructive) {
+                        pendingWineSteamDelete = game
+                    } label: {
+                        Label("删除", systemImage: "trash")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .controlSize(.small)
+                }
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.primary.opacity(0.04))
+        )
+    }
+
+    private func steamInstallStatusBlock(_ status: SteamInstallStatus, game: SteamLibraryGame) -> some View {
+        // 预填充黄字提示：仅在“未（安装完成且成功运行过）”时显示；装好并运行过后隐藏。
+        let hasRun = store.wineSteamGameHasRun(game.appID)
+        let showEvidence = status.prefillEvidenceLabel != nil && !(status.isLaunchReady && hasRun)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.down.circle")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text(status.detailLabel)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            if let progress = status.progressFraction {
+                ProgressView(value: progress)
+                    .controlSize(.small)
+                    .frame(maxWidth: 340)
+            }
+            if showEvidence, let evidence = status.prefillEvidenceLabel {
+                HStack(alignment: .top, spacing: 5) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                    Text(evidence)
+                        .font(.caption2)
+                        .lineLimit(3)
+                }
+                .foregroundStyle(status.prefillEvidenceNeedsAttention ? Color.orange : Color.yellow)
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private func emptySteamState(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "tray")
+                .foregroundStyle(.secondary)
+            Text(localized(text))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.primary.opacity(0.04))
+        )
+    }
+
+    private func steamPill(_ text: String, color: Color) -> some View {
+        Text(localized(text))
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(color.opacity(0.15)))
+            .foregroundStyle(color)
+    }
+
     // MARK: Status bar（补上此前从未显示的 statusMessage）
 
     private var statusBar: some View {
@@ -1047,7 +1739,7 @@ struct RootView: View {
             Image(systemName: "info.circle")
                 .foregroundStyle(.secondary)
                 .font(.caption)
-            Text(store.statusMessage)
+            Text(localized(store.statusMessage))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
@@ -1076,10 +1768,10 @@ struct RootView: View {
 
     private func sectionTitle(_ title: String, subtitle: String?) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(title)
+            Text(localized(title))
                 .font(.title3.weight(.semibold))
             if let subtitle {
-                Text(subtitle)
+                Text(localized(subtitle))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1089,7 +1781,7 @@ struct RootView: View {
 
     private func labeledField<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title)
+            Text(localized(title))
                 .font(.callout.weight(.medium))
                 .foregroundStyle(.secondary)
             content()
@@ -1190,6 +1882,28 @@ struct RootView: View {
 
     // MARK: Bindings & selection sync
 
+    private var wineSteamDeleteBinding: Binding<Bool> {
+        Binding(
+            get: { pendingWineSteamDelete != nil },
+            set: { isPresented in
+                if !isPresented {
+                    pendingWineSteamDelete = nil
+                }
+            }
+        )
+    }
+
+    private var macSteamReimportBinding: Binding<Bool> {
+        Binding(
+            get: { pendingMacSteamReimport != nil },
+            set: { isPresented in
+                if !isPresented {
+                    pendingMacSteamReimport = nil
+                }
+            }
+        )
+    }
+
     private var sidebarBinding: Binding<SidebarItem?> {
         Binding(
             get: { sidebarSelection },
@@ -1227,6 +1941,12 @@ struct RootView: View {
         sidebarSelection = .game(id)
         gameSection = .setup
         store.selectGame(id)
+    }
+
+    /// 主页 Wine Steam 模块的客户端入口：先切到管理页，再启动/唤起客户端。
+    private func openAndLaunchWineSteam() {
+        sidebarSelection = .steam
+        store.launchWineSteamEntry()
     }
 
     /// 新建配置并直接进入其详情。

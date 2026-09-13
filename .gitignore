@@ -6,6 +6,10 @@ Shiori/.build/
 Shiori/.swiftpm/
 *.xcuserstate
 
+# Local Python release-tool caches
+__pycache__/
+*.py[cod]
+
 # Generated icon artifacts (source logo can be kept)
 Shiori/assets/AppIcon.iconset/
 Shiori/assets/Shiori.icns
@@ -13,3 +17,7 @@ Shiori/assets/Shiori.icns
 # Release artifacts and local installers
 Shiori/dist/
 *.pkg
+
+# Sparkle private keys must stay in Keychain / CI secrets, never in Git.
+*sparkle*private*key*
+*.eddsa-key

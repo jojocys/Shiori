@@ -1,5 +1,6 @@
 {
-  "version": "1.0.0",
-  "notes": "首个公开版本",
-  "url": "https://github.com/jojocys/gal-for-MacOS/releases/latest"
+  "build": 3,
+  "version": "0.2.1",
+  "notes": "恢复侧栏新建配置入口，加入悬停展开的应用内更新按钮与中英文界面切换。",
+  "url": "https://github.com/jojocys/Shiori/releases/latest"
 }

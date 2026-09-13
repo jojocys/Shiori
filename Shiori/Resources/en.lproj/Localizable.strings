@@ -1,0 +1,154 @@
+/* Toolbar and navigation */
+"更新" = "Update";
+"检查并安装 Shiori 更新" = "Check for and install Shiori updates";
+"刷新" = "Refresh";
+"语言" = "Language";
+"简体中文" = "Simplified Chinese";
+"English" = "English";
+"外观" = "Appearance";
+"跟随系统" = "System";
+"浅色" = "Light";
+"深色" = "Dark";
+"在线获取游戏封面" = "Fetch game covers online";
+"浅色 / 深色主题 · 在线封面" = "Light / dark theme · Online covers";
+"主页 · 配置选择" = "Home · Configurations";
+
+/* Sidebar and home */
+"我的游戏" = "My Games";
+"新建配置" = "New Configuration";
+"独立客户端入口" = "Standalone client";
+"还没有手动添加的游戏配置" = "No game configurations added yet";
+"尚未发现 Wine Steam 本地游戏" = "No local Wine Steam games found";
+"Wine Steam 游戏" = "Wine Steam Games";
+"启动 Steam 客户端" = "Launch Steam Client";
+"管理" = "Manage";
+"已配置" = "Configured";
+"未配置" = "Not Configured";
+"启动" = "Launch";
+"启动中…" = "Launching…";
+"请先完成配置" = "Complete Setup First";
+"直接启动该游戏" = "Launch this game directly";
+"点击卡片进入配置页并完成设置" = "Open the card and complete setup";
+"安装/验证" = "Install / Verify";
+"通过 Wine Steam 启动该游戏" = "Launch this game through Wine Steam";
+"打开 Wine Steam 安装/验证，只复用校验通过的文件" = "Open Wine Steam installation and reuse only verified files";
+
+/* Game configuration */
+"游戏设置" = "Game Setup";
+"运行环境" = "Runtime";
+"未选择" = "Not Selected";
+"未识别" = "Unknown";
+"启动语言" = "Launch Language";
+"开始游戏" = "Start Game";
+"日志" = "Logs";
+"目录" = "Folder";
+"删除配置" = "Delete Configuration";
+"选择游戏" = "Choose Game";
+"选择整个游戏目录，自动扫描并推荐主程序。" = "Choose the entire game folder to scan it and recommend the main executable.";
+"选择游戏文件夹" = "Choose Game Folder";
+"重新扫描" = "Rescan";
+"手动选择 ROM" = "Choose ROM Manually";
+"手动选择 EXE" = "Choose EXE Manually";
+"配置名称" = "Configuration Name";
+"例如：Senren Banka" = "For example: Senren Banka";
+"当前目录" = "Current Folder";
+"尚未选择" = "Not Selected";
+"图标" = "Icon";
+"使用自定义图标" = "Using a Custom Icon";
+"自动：在线封面(Steam/VNDB) → EXE 内嵌图标 → 目录图片 → 默认符号" = "Automatic: online cover (Steam/VNDB) → embedded EXE icon → folder image → default symbol";
+"选择图标" = "Choose Icon";
+"重新获取封面" = "Fetch Cover Again";
+"清掉缓存，重新从 Steam/VNDB 抓取游戏封面" = "Clear the cache and fetch the cover again from Steam/VNDB";
+"恢复默认" = "Restore Default";
+"扫描结果" = "Scan Results";
+"引擎" = "Engine";
+"候选" = "Candidates";
+"路径" = "Paths";
+"游戏 ROM" = "Game ROM";
+"模拟器" = "Emulator";
+"启动脚本" = "Launch Script";
+"优先" = "Preferred";
+"推荐 EXE" = "Recommended EXE";
+"Wine C 盘" = "Wine C Drive";
+"选择" = "Choose";
+"复制到 C 盘" = "Copy to C Drive";
+"复制为 Prefix 内的真实目录，减少 Z: 路径和符号链接问题" = "Copy into the Prefix as a real directory to avoid Z: paths and symlink issues";
+"保存到游戏列表" = "Save to Game List";
+"选用" = "Use";
+"检测到内核级反作弊 · macOS 无法运行" = "Kernel anti-cheat detected · Cannot run on macOS";
+"检测到反作弊 · macOS 上几乎无法运行" = "Anti-cheat detected · Very unlikely to run on macOS";
+
+/* Runtime */
+"运行环境检测" = "Runtime Check";
+"检测内置 Wine / Rosetta / XQuartz / Gatekeeper。通常只需一次。" = "Check the bundled Wine, Rosetta, XQuartz, and Gatekeeper. This is normally needed only once.";
+"重新检测" = "Check Again";
+"修复与设置" = "Repair and Settings";
+"安装内置 XQuartz" = "Install Bundled XQuartz";
+"隐私与安全性" = "Privacy & Security";
+"一键修复引导" = "Guided Repair";
+"中日文字体兼容" = "Chinese and Japanese Font Compatibility";
+"修复 Windows 原生菜单、对话框和设置窗口中的方块字；仅修改当前游戏的 Wine Prefix。" = "Fix missing glyphs in native Windows menus, dialogs, and settings. Changes apply only to this game's Wine Prefix.";
+"检测并修复中日字体" = "Check and Repair CJK Fonts";
+"撤销字体修复" = "Undo Font Repair";
+"Shiori 使用当前实际 Wine 写入字体别名，不下载或分发 Microsoft 字体；已有自定义映射不会被覆盖。修复后请完全退出并重新打开游戏。" = "Shiori writes font aliases using the active Wine installation and does not download or distribute Microsoft fonts. Existing custom mappings are preserved. Fully quit and reopen the game after repair.";
+"就绪" = "Ready";
+"已内置" = "Bundled";
+"未安装" = "Not Installed";
+"需注意" = "Needs Attention";
+"被拦截" = "Blocked";
+
+/* Switch */
+"Switch 运行环境" = "Switch Runtime";
+"Switch 游戏不经 Wine，由原生模拟器运行；以下三项齐备才能启动。" = "Switch games run through a native emulator instead of Wine. All three items below are required.";
+"导入" = "Import";
+"固件 firmware" = "Firmware";
+"未导入 · 解密游戏所需 · 需你自备" = "Not imported · Required for decryption · Provide your own";
+"未设置 · 系统服务所需 · 需你自备" = "Not set · Required for system services · Provide your own";
+"未设置 · 需你自备（任意 Switch 模拟器均可）" = "Not set · Provide your own Switch emulator";
+"Switch 游戏说明与限制" = "Switch Game Notes and Limitations";
+"Shiori 通过原生 Switch 模拟器运行 .nsp / .xci，不使用 Wine；能否运行与性能取决于模拟器本身。" = "Shiori runs .nsp and .xci files through a native Switch emulator without Wine. Compatibility and performance depend on the emulator.";
+"商业 Switch 游戏经过加密，必须有 prod.keys 才能解密，多数游戏还需系统固件 firmware 才能启动。" = "Commercial Switch games are encrypted and require prod.keys. Most also require system firmware.";
+"并非所有 Switch 游戏都能在 macOS 上良好运行，请以模拟器的兼容性为准。" = "Not every Switch game runs well on macOS. Refer to your emulator's compatibility information.";
+"关于 prod.keys 与固件（需你自备）" = "About prod.keys and Firmware (Bring Your Own)";
+"prod.keys 是你的 Switch 主机密钥，用于解密游戏。请从你本人持有的 Switch 主机导出后，点上方「导入」选择该文件。" = "prod.keys contains console keys used to decrypt games. Export it from a Switch you own, then choose Import above.";
+"固件 firmware 是一组 .nca 系统文件（字体 / 系统服务等）。同样从你本人的主机导出，选择其所在文件夹。" = "Firmware is a set of .nca system files for fonts and system services. Export it from a Switch you own and choose its folder.";
+"为什么 Shiori 不提供这两样：它们是任天堂的版权文件，随 App 分发属于侵权。Shiori 只负责导入你自己合法获取的文件，绝不附带或代为下载。" = "Shiori cannot provide these copyrighted Nintendo files. It only imports files you obtained legally and never bundles or downloads them.";
+
+/* Wine Steam */
+"直接打开 Wine 版 Steam 客户端，不依赖当前游戏配置。" = "Open the Wine version of Steam independently of any game configuration.";
+"唤起 Steam 窗口" = "Show Steam Window";
+"启动 Wine Steam 客户端" = "Launch Wine Steam Client";
+"客户端管理" = "Client Management";
+"下载 Wine Steam" = "Download Wine Steam";
+"结束进程" = "Stop Processes";
+"从 Mac Steam 导入" = "Import from Mac Steam";
+"未发现 Mac Steam 已安装游戏" = "No installed Mac Steam games found";
+"预填充" = "Prefill";
+"重新预填充" = "Prefill Again";
+"Wine 已安装" = "Installed in Wine";
+"待验证" = "Awaiting Verification";
+"已预填充" = "Prefilled";
+"说明" = "Notes";
+"删除" = "Delete";
+"删除文件" = "Delete Files";
+"删除并重新预填充" = "Delete and Prefill Again";
+"取消" = "Cancel";
+
+/* Dialogs */
+"删除当前配置？" = "Delete This Configuration?";
+"只删除配置记录，不删除游戏文件。" = "This deletes only the configuration record, not the game files.";
+"删除 Wine Steam 游戏文件？" = "Delete Wine Steam Game Files?";
+"删除 Wine 侧并重新预填充？" = "Delete the Wine Copy and Prefill Again?";
+
+/* Common status */
+"已创建空白配置" = "Created a blank configuration";
+"欢迎使用：先在 P1 选择游戏文件夹。" = "Welcome. Start by choosing a game folder in P1.";
+"已刷新 Steam 库" = "Refreshed Steam libraries";
+"配置尚未就绪。" = "The configuration is not ready.";
+"更新已准备安装，请先完成更新并重启 Shiori，再启动游戏或运行环境。" = "The update is ready to install. Complete the update and restart Shiori before launching a game or runtime.";
+
+/* App commands and updater */
+"添加游戏文件夹" = "Add Game Folder";
+"检查更新…" = "Check for Updates…";
+"检查更新不可用" = "Updates Are Unavailable";
+"请使用安装到应用程序目录的 Shiori 正式 App。源码运行不支持应用内更新。" = "Use an official Shiori app installed in Applications. In-app updates are unavailable when running from source.";

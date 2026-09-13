@@ -62,18 +62,20 @@ enum GameLauncher {
         guard let wineBinary = RuntimeManager.resolveWineBinary(preferred: preferredWineBinaryPath) else {
             throw GameLauncherError.wineNotFound
         }
-        let locale = resolveLocale(for: game)
+        let locale = resolvedLocale(for: game)
 
         let logURL = logsDir.appendingPathComponent(logFileName(for: game))
         guard fm.createFile(atPath: logURL.path, contents: nil) || fm.fileExists(atPath: logURL.path) else {
             throw GameLauncherError.logCreateFailed
         }
+        let executableArgument = windowsDriveCPath(for: exeURL, prefixURL: prefixURL) ?? exeURL.path
 
         let prelude = [
             "[\(Date())] Launch request",
             "GAME=\(game.name)",
             "FOLDER=\(folderURL.path)",
             "EXE=\(exeURL.path)",
+            "EXE_ARG=\(executableArgument)",
             "PREFIX=\(prefixURL.path)",
             "WINE=\(wineBinary)",
             "LANG_MODE=\(game.launchLanguageMode.rawValue)",
@@ -89,7 +91,7 @@ enum GameLauncher {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: wineBinary)
-        process.arguments = [exeURL.path]
+        process.arguments = [executableArgument]
         process.currentDirectoryURL = folderURL
         var env = ProcessInfo.processInfo.environment
         env["WINEPREFIX"] = prefixURL.path
@@ -103,6 +105,25 @@ enum GameLauncher {
 
         try process.run()
         return logURL
+    }
+
+    private static func windowsDriveCPath(for url: URL, prefixURL: URL) -> String? {
+        let driveCURL = prefixURL
+            .appendingPathComponent("drive_c", isDirectory: true)
+            .standardizedFileURL
+        let targetURL = url.standardizedFileURL
+        let driveCPath = driveCURL.path
+        let driveCPrefix = driveCPath.hasSuffix("/") ? driveCPath : driveCPath + "/"
+        let targetPath = targetURL.path
+
+        if targetPath == driveCPath { return "C:\\" }
+        guard targetPath.hasPrefix(driveCPrefix) else {
+            return nil
+        }
+
+        let relative = String(targetPath.dropFirst(driveCPrefix.count))
+        let components = relative.split(separator: "/").map(String.init)
+        return "C:\\" + components.joined(separator: "\\")
     }
 
     /// Switch：优先复刻游戏夹里的现成一键脚本（兼容任意模拟器/参数/汉化设置）；否则通用 open -n。
@@ -173,7 +194,7 @@ enum GameLauncher {
         return "\(safe)-\(formatter.string(from: Date())).log"
     }
 
-    private static func resolveLocale(for game: GameEntry) -> String {
+    static func resolvedLocale(for game: GameEntry) -> String {
         switch game.launchLanguageMode {
         case .japanese:
             return "ja_JP.UTF-8"

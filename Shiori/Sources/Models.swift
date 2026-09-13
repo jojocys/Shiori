@@ -48,6 +48,7 @@ struct GameEntry: Identifiable, Codable, Hashable {
     var emulatorAppPath: String  // Switch: 模拟器 .app（任意，不限 Ryujinx）
     var launchScriptPath: String // Switch: 现成启动脚本（优先复刻）
     var launchLanguageMode: LaunchLanguageMode
+    var iconPath: String         // 自定义图标：用户手动指定的图片文件（留空则自动提取/回退）
     var notes: String
     var createdAt: Date
     var updatedAt: Date
@@ -64,6 +65,7 @@ struct GameEntry: Identifiable, Codable, Hashable {
         emulatorAppPath: String = "",
         launchScriptPath: String = "",
         launchLanguageMode: LaunchLanguageMode = .auto,
+        iconPath: String = "",
         notes: String = "",
         createdAt: Date = Date(),
         updatedAt: Date = Date()
@@ -79,6 +81,7 @@ struct GameEntry: Identifiable, Codable, Hashable {
         self.emulatorAppPath = emulatorAppPath
         self.launchScriptPath = launchScriptPath
         self.launchLanguageMode = launchLanguageMode
+        self.iconPath = iconPath
         self.notes = notes
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -96,6 +99,7 @@ struct GameEntry: Identifiable, Codable, Hashable {
         case emulatorAppPath
         case launchScriptPath
         case launchLanguageMode
+        case iconPath
         case notes
         case createdAt
         case updatedAt
@@ -114,6 +118,7 @@ struct GameEntry: Identifiable, Codable, Hashable {
         emulatorAppPath = try container.decodeIfPresent(String.self, forKey: .emulatorAppPath) ?? ""
         launchScriptPath = try container.decodeIfPresent(String.self, forKey: .launchScriptPath) ?? ""
         launchLanguageMode = try container.decodeIfPresent(LaunchLanguageMode.self, forKey: .launchLanguageMode) ?? .auto
+        iconPath = try container.decodeIfPresent(String.self, forKey: .iconPath) ?? ""
         notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
@@ -135,9 +140,17 @@ struct GameEntry: Identifiable, Codable, Hashable {
     }
 
     var displaySubtitle: String {
-        if let exeURL { return exeURL.lastPathComponent }
-        if let folderURL { return folderURL.lastPathComponent }
-        return "未配置"
+        switch platform {
+        case .windows:
+            if let exeURL { return exeURL.lastPathComponent }
+            if let folderURL { return folderURL.lastPathComponent }
+            return "未配置"
+        case .switchEmu:
+            if !romPath.isEmpty { return URL(fileURLWithPath: romPath).lastPathComponent }
+            if !launchScriptPath.isEmpty { return URL(fileURLWithPath: launchScriptPath).lastPathComponent }
+            if let folderURL { return folderURL.lastPathComponent }
+            return "未配置"
+        }
     }
 }
 
@@ -149,6 +162,8 @@ struct GameStoreFile: Codable {
     // Switch 运行所需，由用户自备（不随 App 分发）。可选以兼容旧库。
     var preferredKeysPath: String?
     var preferredFirmwarePath: String?
+    // 已成功启动过的 Wine Steam 游戏 AppID（安装完成 + 运行过 → 不再显示预填充黄字提示）。
+    var launchedWineSteamAppIDs: [String]?
 }
 
 struct ScanCandidate: Identifiable, Hashable {
