@@ -1,0 +1,32 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Shiori</title>
+        <item>
+            <title>0.2.1</title>
+            <pubDate>Sun, 13 Sep 2026 12:37:17 +0800</pubDate>
+            <sparkle:version>3</sparkle:version>
+            <sparkle:shortVersionString>0.2.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# Shiori 0.2.1
+
+本版本以 GitHub 上一个正式版本 `v0.2.0` 为版本基准，并开始使用统一 DMG 完成首次安装与后续应用内更新。
+
+- 恢复侧栏底部醒目的蓝色“新建配置”按钮，同时保留主页“我的游戏”区域的新建入口。
+- 标题栏使用更紧凑的上下间距；右上方更新入口默认为与标题栏融为一体的下载图标，悬停时平滑展开为“下载图标 + 更新”，点击后直接检查、下载、验证并安装新版本。
+- 新增简体中文与 English 界面切换，语言选择会自动保存。
+- 集成 Sparkle 更新流程，更新包由 GitHub Releases 托管，固定 appcast 由 GitHub Pages 提供。
+- 更新归档使用 Ed25519 签名验证，完整安装包统一为 `Shiori-0.2.1.dmg`。
+- 更新安装前会保存游戏配置；如果仍有受 Shiori 管理的游戏、Wine 或模拟器进程，安装会暂缓，不会强制结束游戏。
+- 本地游戏配置为空时不再自动创建空白配置；只有用户手动点击“新建配置”才创建并保存。
+- `games.json` 同步维护原子恢复副本，替换 App 或应用内更新不会删除 `~/.shiori/` 中的配置、Prefix、封面和日志。
+
+本次真实更新测试使用本地 `0.2.0/build 2` 作为更新前版本，GitHub Release `0.2.1/build 3` 作为更新目标。
+
+支持 macOS 13 及以上的 Apple Silicon Mac。当前构建使用 ad-hoc 应用签名；首次从浏览器安装时仍可能出现 macOS 安全提示。
+]]></description>
+            <enclosure url="https://github.com/jojocys/Shiori/releases/download/v0.2.1/Shiori-0.2.1.dmg" length="485581904" type="application/octet-stream" sparkle:edSignature="dSUWsa43igAM9mKa9JFyIHOeqogEFMiEKbOUkQiNi0sVfBHm2eTzVZYMtv4UQRgFC7SyMUjeMYPUDDpPiqYBCw=="/>
+        </item>
+    </channel>
+</rss>

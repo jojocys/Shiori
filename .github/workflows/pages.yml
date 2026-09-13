@@ -1,0 +1,50 @@
+name: Publish update feed
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/appcast.xml"
+      - ".github/workflows/pages.yml"
+      - "Shiori/scripts/release.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install public-key verification dependency
+        run: python -m pip install 'cryptography>=46,<47'
+      - name: Verify every referenced release asset before deployment
+        run: python Shiori/scripts/release.py verify-online docs/appcast.xml --promotion
+      - name: Reject stale workflow runs
+        run: test "$(git rev-parse HEAD)" = "$(git ls-remote origin refs/heads/main | cut -f1)"
+      - name: Stage only the public update feed
+        run: |
+          mkdir -p "$RUNNER_TEMP/shiori-pages"
+          cp docs/appcast.xml "$RUNNER_TEMP/shiori-pages/appcast.xml"
+          touch "$RUNNER_TEMP/shiori-pages/.nojekyll"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/shiori-pages
+      - name: Deploy update feed
+        id: deployment
+        uses: actions/deploy-pages@v4
