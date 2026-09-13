@@ -100,6 +100,13 @@ class ReleaseTests(unittest.TestCase):
                 expected, allowed, resolve,
             )
 
+    def testOptionalDraftTagAcceptsGitHubNoCommitResponse(self):
+        missing = subprocess.CompletedProcess([], 1, stdout="", stderr="gh: No commit found for SHA: v0.2.1 (HTTP 422)\n")
+        with patch.object(r.subprocess, "run", return_value=missing):
+            self.assertIsNone(r.resolve_remote_commit("v0.2.1", optional=True))
+            with self.assertRaises(ValueError):
+                r.resolve_remote_commit("v0.2.1", optional=False)
+
     def testRecordedExternalInputsDetectFileAndTreeChanges(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -114,7 +114,7 @@ def validate_release_origin(release, source_commit, allowed_assets, resolve_comm
 
 def resolve_remote_commit(ref, optional=False):
     result = subprocess.run(["gh", "api", f"repos/{REPOSITORY}/commits/{urllib.parse.quote(ref, safe='')}", "--jq", ".sha"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode and optional and "404" in result.stderr:
+    if result.returncode and optional and ("404" in result.stderr or "No commit found" in result.stderr):
         return None
     require(result.returncode == 0, "Cannot resolve remote source commit/tag")
     return result.stdout.strip()
@@ -473,7 +473,9 @@ def publish(stage):
             run(["gh", "release", "upload", "v" + version, asset, "--repo", REPOSITORY])
     phase("draft-assets-uploaded" if existing["draft"] else "release-published")
     if existing["draft"]:
-        run(["gh", "api", "--method", "PATCH", f"repos/{REPOSITORY}/releases/{existing['id']}", "-F", "draft=false"])
+        run(["gh", "api", "--method", "PATCH", f"repos/{REPOSITORY}/releases/{existing['id']}",
+             "-f", "tag_name=v" + version, "-f", "target_commitish=" + state["source_commit"],
+             "-F", "draft=false"])
         phase("release-published")
     online(feed, metadata(app)["SUPublicEDKey"], build)
     phase("assets-verified")
