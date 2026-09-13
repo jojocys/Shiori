@@ -447,9 +447,11 @@ def publish(stage):
     elif existing["draft"]:
         # A maintainer may have prepared a placeholder draft before the signed bytes exist.
         # Keep that draft, but make its review text match the exact prepared candidate.
+        notes_body = (stage / "release-notes.md").read_text()
         run(["gh", "api", "--method", "PATCH", f"repos/{REPOSITORY}/releases/{existing['id']}",
-             "-f", "name=Shiori " + version, "-f", f"body=@{stage / 'release-notes.md'}",
-             "-f", "target_commitish=" + state["source_commit"], "-F", "draft=true"])
+             "-f", "tag_name=v" + version, "-f", "name=Shiori " + version,
+             "-f", "body=" + notes_body, "-f", "target_commitish=" + state["source_commit"],
+             "-F", "draft=true"])
         releases = json.loads(capture(["gh", "api", f"repos/{REPOSITORY}/releases?per_page=100"]))
         existing = next(r for r in releases if r["tag_name"] == "v" + version)
     validate_release_origin(existing, state["source_commit"], {dmg.name, dmg.name + ".sha256.txt"}, resolve_remote_commit)
