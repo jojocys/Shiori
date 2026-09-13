@@ -1,6 +1,6 @@
 {
-  "build": 3,
-  "version": "0.2.1",
-  "notes": "恢复侧栏新建配置入口，加入悬停展开的应用内更新按钮与中英文界面切换。",
+  "build": 4,
+  "version": "0.2.2",
+  "notes": "优化标题栏更新按钮的父容器展开动画，并压缩主页顶部留白。",
   "url": "https://github.com/jojocys/Shiori/releases/latest"
 }

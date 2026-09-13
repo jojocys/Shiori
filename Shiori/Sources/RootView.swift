@@ -204,27 +204,38 @@ struct RootView: View {
             Button {
                 checkForUpdates()
             } label: {
-                HStack(spacing: isUpdateButtonHovered ? 5 : 0) {
-                    Image(systemName: isUpdateButtonHovered ? "arrow.down.circle.fill" : "arrow.down.circle")
-                        .scaleEffect(isUpdateButtonHovered ? 1.06 : 1)
+                ZStack(alignment: .leading) {
+                    HStack(spacing: 5) {
+                        Image(systemName: isUpdateButtonHovered ? "arrow.down.circle.fill" : "arrow.down.circle")
+                            .frame(width: 16)
+                            .scaleEffect(isUpdateButtonHovered ? 1.06 : 1)
 
-                    if isUpdateButtonHovered {
                         Text("更新")
+                            .lineLimit(1)
                             .fixedSize()
-                            .transition(.opacity.combined(with: .move(edge: .trailing)))
+                            .opacity(isUpdateButtonHovered ? 1 : 0)
+                            .offset(x: isUpdateButtonHovered ? 0 : -5)
                     }
+                    .padding(.horizontal, 7)
                 }
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(isUpdateButtonHovered ? Color.accentColor : Color.secondary)
-                    .frame(height: 26)
-                    .padding(.horizontal, isUpdateButtonHovered ? 8 : 4)
-                    .contentShape(Capsule())
-                    .animation(.easeInOut(duration: 0.18), value: isUpdateButtonHovered)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(isUpdateButtonHovered ? Color.accentColor : Color.secondary)
+                .frame(
+                    width: isUpdateButtonHovered ? (language == .english ? 84 : 66) : 30,
+                    height: 28,
+                    alignment: .leading
+                )
+                .background(
+                    Capsule()
+                        .fill(isUpdateButtonHovered ? Color.primary.opacity(0.10) : Color.clear)
+                )
+                .clipShape(Capsule())
+                .contentShape(Capsule())
+                .animation(.easeInOut(duration: 0.20), value: isUpdateButtonHovered)
             }
             .buttonStyle(.plain)
-            .background(Capsule().fill(Color.clear))
             .onHover { hovering in
-                withAnimation(.easeInOut(duration: 0.18)) {
+                withAnimation(.easeInOut(duration: 0.20)) {
                     isUpdateButtonHovered = hovering
                 }
             }
@@ -475,7 +486,8 @@ struct RootView: View {
                     }
                 }
                 .padding(.horizontal, 24)
-                .padding(.vertical, 20)
+                .padding(.top, 8)
+                .padding(.bottom, 20)
             }
 
             statusBar
@@ -534,7 +546,7 @@ struct RootView: View {
                 .controlSize(.large)
             }
         }
-        .frame(minHeight: 58)
+        .frame(minHeight: 42)
     }
 
     private var homeWineSteamSectionHeader: some View {
