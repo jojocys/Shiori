@@ -112,6 +112,17 @@ def validate_release_origin(release, source_commit, allowed_assets, resolve_comm
     require({a["name"] for a in release["assets"]}.issubset(allowed_assets), "Release contains unexpected assets; refusing to publish multiple installation packages")
 
 
+def find_release(releases, version):
+    """Find a draft or published release from the releases collection.
+
+    GitHub's releases/tags endpoint returns 404 for a newly-created draft even
+    when that draft already has the requested tag_name.
+    """
+    matches = [release for release in releases if release["tag_name"] == "v" + version]
+    require(len(matches) <= 1, "Multiple Releases use the requested version tag")
+    return matches[0] if matches else None
+
+
 def resolve_remote_commit(ref, optional=False):
     result = subprocess.run(["gh", "api", f"repos/{REPOSITORY}/commits/{urllib.parse.quote(ref, safe='')}", "--jq", ".sha"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode and optional and ("404" in result.stderr or "No commit found" in result.stderr):
@@ -434,7 +445,7 @@ def publish(stage):
         state["phase"] = value
         atomic_write(stage / "release.json", json.dumps(state, indent=2, ensure_ascii=False) + "\n")
     releases = json.loads(capture(["gh", "api", f"repos/{REPOSITORY}/releases?per_page=100"]))
-    existing = next((r for r in releases if r["tag_name"] == "v" + version), None)
+    existing = find_release(releases, version)
     for release in releases:
         tag = release["tag_name"].removeprefix("v")
         if re.fullmatch(r"\d+\.\d+\.\d+", tag) and tag != version:
@@ -443,7 +454,9 @@ def publish(stage):
         notes = stage / "release-notes.md"
         run(["gh", "release", "create", "v" + version, "--repo", REPOSITORY, "--draft", "--title", "Shiori " + version,
              "--notes-file", notes, "--target", state["source_commit"]])
-        existing = json.loads(capture(["gh", "api", f"repos/{REPOSITORY}/releases/tags/v{version}"]))
+        releases = json.loads(capture(["gh", "api", f"repos/{REPOSITORY}/releases?per_page=100"]))
+        existing = find_release(releases, version)
+        require(existing is not None and existing["draft"], "Newly-created draft Release was not discoverable")
     elif existing["draft"]:
         # A maintainer may have prepared a placeholder draft before the signed bytes exist.
         # Keep that draft, but make its review text match the exact prepared candidate.
@@ -453,7 +466,8 @@ def publish(stage):
              "-f", "body=" + notes_body, "-f", "target_commitish=" + state["source_commit"],
              "-F", "draft=true"])
         releases = json.loads(capture(["gh", "api", f"repos/{REPOSITORY}/releases?per_page=100"]))
-        existing = next(r for r in releases if r["tag_name"] == "v" + version)
+        existing = find_release(releases, version)
+        require(existing is not None, "Updated draft Release was not discoverable")
     validate_release_origin(existing, state["source_commit"], {dmg.name, dmg.name + ".sha256.txt"}, resolve_remote_commit)
     # Always reconcile the local record with the remote state before attempting a retry.
     phase("draft-found" if existing["draft"] else "release-published")

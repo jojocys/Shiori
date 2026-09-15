@@ -107,6 +107,14 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 r.resolve_remote_commit("v0.2.1", optional=False)
 
+    def testDraftReleaseIsFoundFromReleaseCollection(self):
+        draft = {"tag_name": "v0.2.2", "draft": True}
+        published = {"tag_name": "v0.2.1", "draft": False}
+        self.assertIs(r.find_release([published, draft], "0.2.2"), draft)
+        self.assertIsNone(r.find_release([published], "0.2.2"))
+        with self.assertRaises(ValueError):
+            r.find_release([draft, dict(draft)], "0.2.2")
+
     def testRecordedExternalInputsDetectFileAndTreeChanges(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
