@@ -21,3 +21,6 @@ Shiori/dist/
 # Sparkle private keys must stay in Keychain / CI secrets, never in Git.
 *sparkle*private*key*
 *.eddsa-key
+
+# Local detailed release history (may contain internal UI implementation notes)
+/Shiori-历史版本变更总览.md

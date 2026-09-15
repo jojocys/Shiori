@@ -3,12 +3,17 @@ import SwiftUI
 
 @main
 struct ShioriApp: App {
+    /// The unified toolbar starts at the detail column edge while the home
+    /// content is inset by 24 pt. The Unicode spacing below gives the native
+    /// title the same visual inset as the home section header.
+    private static let alignedWindowTitle = "\u{2003}\u{2002}\u{2004}\(AppInfo.name)"
+
     @NSApplicationDelegateAdaptor(ShioriApplicationDelegate.self) private var appDelegate
     @StateObject private var store = AppStore()
     @StateObject private var updater = ShioriUpdater()
 
     var body: some Scene {
-        WindowGroup(AppInfo.name) {
+        WindowGroup(Self.alignedWindowTitle) {
             RootView(store: store, checkForUpdates: updater.checkForUpdates, canCheckForUpdates: updater.canCheckForUpdates)
                 .onAppear { store.configureUpdateSafety() }
                 .onReceive(NSWorkspace.shared.notificationCenter.publisher(

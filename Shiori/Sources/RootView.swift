@@ -87,6 +87,102 @@ private struct SidebarWidthKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
+/// Keep AppKit's toolbar item at a constant size; only the capsule inside it expands.
+private struct UpdateToolbarButton: View {
+    let title: String
+    let helpText: String
+    let isEnabled: Bool
+    let action: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            UpdateToolbarLabel(title: title, expansion: isHovered && isEnabled ? 1 : 0)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.45)
+        .accessibilityLabel(Text(verbatim: title))
+        .help(Text(verbatim: helpText))
+        // Observe the actual button, before adding the reserved toolbar space.
+        // The invisible space to its left must neither trigger hover nor accept clicks.
+        .onHover { isHovered = $0 && isEnabled }
+        .animation(
+            reduceMotion ? nil : .timingCurve(0.22, 0.75, 0.25, 1, duration: 0.34),
+            value: isHovered && isEnabled
+        )
+        .frame(width: UpdateToolbarLabel.reservedWidth, height: 28, alignment: .trailing)
+        .onChange(of: isEnabled) { enabled in
+            if !enabled { isHovered = false }
+        }
+        .onDisappear { isHovered = false }
+    }
+}
+
+/// A single reversible timeline avoids delayed callbacks and competing hover animations.
+private struct UpdateToolbarLabel: View, Animatable {
+    let title: String
+    var expansion: CGFloat
+
+    var animatableData: CGFloat {
+        get { expansion }
+        set { expansion = newValue }
+    }
+
+    private static let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+    private static let collapsedWidth: CGFloat = 30
+
+    private static func expandedWidth(for title: String) -> CGFloat {
+        ceil((title as NSString).size(withAttributes: [.font: font]).width) + 40
+    }
+
+    // Reserve both supported languages so switching languages also leaves adjacent
+    // toolbar controls in place. The capsule still fits its current localized title.
+    static let reservedWidth = max(expandedWidth(for: "更新"), expandedWidth(for: "Update"))
+
+    var body: some View {
+        let progress = min(max(expansion, 0), 1)
+        let widthProgress = min(progress / 0.74, 1)
+        let textProgress = max((progress - 0.74) / 0.26, 0)
+        let width = Self.collapsedWidth + (Self.expandedWidth(for: title) - Self.collapsedWidth) * widthProgress
+
+        ZStack(alignment: .leading) {
+            Capsule()
+                .fill(Color.primary.opacity(0.09 * progress))
+
+            Image(systemName: "arrow.down.circle")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.secondary)
+                .overlay {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Color.accentColor)
+                        .opacity(progress)
+                }
+                .frame(width: 16, height: 28)
+                .padding(.leading, 7)
+                .allowsHitTesting(false)
+
+            Text(verbatim: title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .fixedSize()
+                // The full label fades in only after the capsule has room for it.
+                // Reversing hover hides it before shrinking, so no glyph is sliced.
+                .opacity(textProgress)
+                .offset(x: 2 * (1 - textProgress))
+                .padding(.leading, 28)
+                .allowsHitTesting(false)
+        }
+        .frame(width: width, height: 28, alignment: .leading)
+        .clipShape(Capsule())
+        .contentShape(Capsule())
+        .accessibilityHidden(true)
+    }
+}
+
 struct RootView: View {
     @ObservedObject var store: AppStore
     let checkForUpdates: () -> Void
@@ -102,7 +198,6 @@ struct RootView: View {
     @State private var pendingMacSteamReimport: SteamLibraryGame?
     @State private var coverPreviewGame: GameEntry?
     @State private var sidebarWidth: CGFloat = 264
-    @State private var isUpdateButtonHovered = false
     private let steamRefreshTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
     private var appearance: AppearancePreference {
@@ -201,47 +296,12 @@ struct RootView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
-            Button {
-                checkForUpdates()
-            } label: {
-                ZStack(alignment: .leading) {
-                    HStack(spacing: 5) {
-                        Image(systemName: isUpdateButtonHovered ? "arrow.down.circle.fill" : "arrow.down.circle")
-                            .frame(width: 16)
-                            .scaleEffect(isUpdateButtonHovered ? 1.06 : 1)
-
-                        Text("更新")
-                            .lineLimit(1)
-                            .fixedSize()
-                            .opacity(isUpdateButtonHovered ? 1 : 0)
-                            .offset(x: isUpdateButtonHovered ? 0 : -5)
-                    }
-                    .padding(.horizontal, 7)
-                }
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(isUpdateButtonHovered ? Color.accentColor : Color.secondary)
-                .frame(
-                    width: isUpdateButtonHovered ? (language == .english ? 84 : 66) : 30,
-                    height: 28,
-                    alignment: .leading
-                )
-                .background(
-                    Capsule()
-                        .fill(isUpdateButtonHovered ? Color.primary.opacity(0.10) : Color.clear)
-                )
-                .clipShape(Capsule())
-                .contentShape(Capsule())
-                .animation(.easeInOut(duration: 0.20), value: isUpdateButtonHovered)
-            }
-            .buttonStyle(.plain)
-            .onHover { hovering in
-                withAnimation(.easeInOut(duration: 0.20)) {
-                    isUpdateButtonHovered = hovering
-                }
-            }
-            .opacity(canCheckForUpdates ? 1 : 0.45)
-            .disabled(!canCheckForUpdates)
-            .help("检查并安装 Shiori 更新")
+            UpdateToolbarButton(
+                title: localized("更新"),
+                helpText: localized("检查并安装 Shiori 更新"),
+                isEnabled: canCheckForUpdates,
+                action: checkForUpdates
+            )
 
             Button {
                 refreshAllUserData()

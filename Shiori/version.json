@@ -1,6 +1,6 @@
 {
   "build": 4,
   "version": "0.2.2",
-  "notes": "优化标题栏更新按钮的父容器展开动画，并压缩主页顶部留白。",
+  "notes": "可通过 Shiori 应用内更新按钮直接获取后续版本；优化了部分 UI。",
   "url": "https://github.com/jojocys/Shiori/releases/latest"
 }
