@@ -14,7 +14,7 @@ struct ShioriApp: App {
 
     var body: some Scene {
         WindowGroup(Self.alignedWindowTitle) {
-            RootView(store: store, checkForUpdates: updater.checkForUpdates, canCheckForUpdates: updater.canCheckForUpdates)
+            RootView(store: store, updater: updater)
                 .onAppear { store.configureUpdateSafety() }
                 .onReceive(NSWorkspace.shared.notificationCenter.publisher(
                     for: NSWorkspace.didActivateApplicationNotification
@@ -43,7 +43,7 @@ struct ShioriApp: App {
                 Button("检查更新…") {
                     updater.checkForUpdates()
                 }
-                .disabled(!updater.canCheckForUpdates)
+                .disabled(!(updater.canCheckForUpdates || updater.toolbarState.isDownloaded))
             }
         }
     }

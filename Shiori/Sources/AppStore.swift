@@ -14,7 +14,6 @@ final class AppStore: ObservableObject {
     private static let steamInstallerURL = URL(string: "https://cdn.cloudflare.steamstatic.com/client/installer/SteamSetup.exe")!
     /// Steam 关窗后会保持后台运行，Wine 的 Dock reopen 只能恢复已有的最小化窗口。
     /// 将这个 URL 转交给现有 Steam 实例，才能让 Steam 自己重建已关闭/隐藏的主窗口。
-    private static let steamShowMainWindowURL = "steam://open/main"
 
     @Published var games: [GameEntry] = []
     @Published var selectedGameID: UUID?
@@ -30,7 +29,7 @@ final class AppStore: ObservableObject {
     @Published var macSteamGames: [SteamLibraryGame] = []
     @Published var wineSteamGames: [SteamLibraryGame] = []
     @Published var wineSteamInstallStatuses: [String: SteamInstallStatus] = [:]
-    // 已确认检测到游戏进程的 Wine Steam AppID（安装完成 + 运行过 → 隐藏预填充黄字提示）。
+    // 已确认检测到游戏进程的 Wine Steam AppID，保留为本地启动历史。
     @Published var launchedWineSteamAppIDs: Set<String> = []
     @Published var launchingWineSteamAppIDs: Set<String> = []
     @Published var isWineSteamRunning = false
@@ -889,7 +888,7 @@ final class AppStore: ObservableObject {
         !game.appID.isEmpty && launchingWineSteamAppIDs.contains(game.appID)
     }
 
-    /// 该 Wine Steam 游戏是否已安装完成且成功启动过（用于隐藏预填充黄字提示）。
+    /// 该 Wine Steam 游戏是否曾由 Shiori 确认成功启动。
     func wineSteamGameHasRun(_ appID: String) -> Bool {
         !appID.isEmpty && launchedWineSteamAppIDs.contains(appID)
     }
@@ -1020,7 +1019,9 @@ final class AppStore: ObservableObject {
                 // 客户端还活着，多半只是主窗口被关掉了（Steam 关窗＝隐藏到托盘）。
                 // 这时再起一个客户端没有意义，而什么都不做又会让用户只能杀进程重开，
                 // 所以把 steam://open/main 转交给现有实例，由它重新显示主窗口。
-                arguments = [Self.steamShowMainWindowURL]
+                arguments = WineSteamDockReopenPolicy.clientEntryArguments(
+                    steamMainClientPIDs: existingSteamPIDs
+                )
                 reopenedExistingClient = true
                 lastWineSteamWindowReopenRequestAt = Date()
             }
@@ -1824,7 +1825,7 @@ final class AppStore: ObservableObject {
 
             lastWineSteamWindowReopenRequestAt = now
             _ = launchWineSteam(
-                extraArguments: [Self.steamShowMainWindowURL],
+                extraArguments: [WineSteamDockReopenPolicy.showMainWindowURL],
                 successMessage: "已通过程序坞请求重新显示 Wine Steam 主窗口。",
                 missingSteamMessage: "未找到当前程序坞图标所属的 Wine Steam。",
                 allowInstallerFallback: false,

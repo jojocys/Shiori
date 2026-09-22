@@ -87,106 +87,214 @@ private struct SidebarWidthKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
-/// Keep AppKit's toolbar item at a constant size; only the capsule inside it expands.
+/// The widest state owns the toolbar slot so adjacent controls never jump while
+/// the updater moves between icon and capsule presentations.
 private struct UpdateToolbarButton: View {
-    let title: String
-    let helpText: String
+    let state: UpdateToolbarState
+    let language: AppLanguage
     let isEnabled: Bool
     let action: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered = false
+    @State private var isPressed = false
+    @State private var arrivalScale: CGFloat = 1
+
+    private var title: String? {
+        switch state {
+        case .available(let version):
+            return language == .english ? "Version \(version)" : "新版本 \(version)"
+        case .downloading:
+            return language == .english ? "Downloading…" : "下载中"
+        case .downloaded:
+            return language == .english ? "Restart to Update" : "重启以更新"
+        case .idle, .checking, .upToDate, .hidden, .failed:
+            return nil
+        }
+    }
+
+    private var helpText: String {
+        switch state {
+        case .idle: return language == .english ? "Check for Updates" : "检查更新"
+        case .checking: return language == .english ? "Checking for updates" : "正在检查更新"
+        case .upToDate: return language == .english ? "Up to date" : "已是最新版本"
+        case .available:
+            return language == .english ? "Open update details" : "打开更新详情"
+        case .downloading: return language == .english ? "Downloading update" : "正在下载更新"
+        case .downloaded: return language == .english ? "Restart to Update" : "重启以更新"
+        case .failed: return language == .english ? "Unable to check. Click to retry." : "暂时无法检查更新，点按重试"
+        case .hidden: return ""
+        }
+    }
+
+    private var accessibilityText: String {
+        if let title { return title }
+        return helpText
+    }
 
     var body: some View {
         Button(action: action) {
-            UpdateToolbarLabel(title: title, expansion: isHovered && isEnabled ? 1 : 0)
+            UpdateToolbarLabel(state: state, title: title, hovered: isHovered && isEnabled)
+                .scaleEffect(reduceMotion ? 1 : arrivalScale * (isPressed ? 0.97 : 1))
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)
-        .opacity(isEnabled ? 1 : 0.45)
-        .accessibilityLabel(Text(verbatim: title))
+        .accessibilityLabel(Text(verbatim: accessibilityText))
         .help(Text(verbatim: helpText))
-        // Observe the actual button, before adding the reserved toolbar space.
-        // The invisible space to its left must neither trigger hover nor accept clicks.
         .onHover { isHovered = $0 && isEnabled }
-        .animation(
-            reduceMotion ? nil : .timingCurve(0.22, 0.75, 0.25, 1, duration: 0.34),
-            value: isHovered && isEnabled
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = isEnabled }
+                .onEnded { _ in isPressed = false }
         )
-        .frame(width: UpdateToolbarLabel.reservedWidth, height: 28, alignment: .trailing)
+        .frame(width: UpdateToolbarLabel.reservedWidth, height: 30, alignment: .trailing)
+        .onChange(of: state) { newState in
+            guard !reduceMotion else { return }
+            switch newState {
+            case .available, .downloaded:
+                arrivalScale = 0.88
+                withAnimation(.spring(response: 0.22, dampingFraction: 0.54)) { arrivalScale = 1 }
+            default:
+                arrivalScale = 1
+            }
+        }
         .onChange(of: isEnabled) { enabled in
             if !enabled { isHovered = false }
         }
-        .onDisappear { isHovered = false }
+        .onDisappear { isHovered = false; isPressed = false }
     }
 }
 
-/// A single reversible timeline avoids delayed callbacks and competing hover animations.
-private struct UpdateToolbarLabel: View, Animatable {
-    let title: String
-    var expansion: CGFloat
+private struct UpdateToolbarLabel: View {
+    let state: UpdateToolbarState
+    let title: String?
+    let hovered: Bool
 
-    var animatableData: CGFloat {
-        get { expansion }
-        set { expansion = newValue }
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
+
+    static let reservedWidth: CGFloat = 182
+
+    private var isPill: Bool {
+        switch state {
+        case .available, .downloading, .downloaded: return true
+        case .idle, .checking, .upToDate, .hidden, .failed: return false
+        }
     }
 
-    private static let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-    private static let collapsedWidth: CGFloat = 30
-
-    private static func expandedWidth(for title: String) -> CGFloat {
-        ceil((title as NSString).size(withAttributes: [.font: font]).width) + 40
+    private var isWarning: Bool {
+        switch state {
+        case .downloaded, .failed: return true
+        default: return false
+        }
     }
 
-    // Reserve both supported languages so switching languages also leaves adjacent
-    // toolbar controls in place. The capsule still fits its current localized title.
-    static let reservedWidth = max(expandedWidth(for: "更新"), expandedWidth(for: "Update"))
+    private var pillWidth: CGFloat {
+        guard let title else { return 28 }
+        let font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        let labelWidth = ceil((title as NSString).size(withAttributes: [.font: font]).width)
+        return min(Self.reservedWidth, max(106, labelWidth + 43))
+    }
+
+    private var tint: Color {
+        if isWarning { return colorScheme == .dark ? Color(red: 1, green: 0.624, blue: 0.039) : Color(red: 1, green: 0.584, blue: 0) }
+        return colorScheme == .dark ? Color(red: 0.039, green: 0.518, blue: 1) : Color(red: 0, green: 0.478, blue: 1)
+    }
+
+    private var foreground: Color {
+        if isWarning {
+            return colorScheme == .dark ? Color(red: 1, green: 0.773, blue: 0.463) : Color(red: 0.541, green: 0.294, blue: 0)
+        }
+        return colorScheme == .dark ? Color(red: 0.663, green: 0.824, blue: 1) : Color(red: 0.039, green: 0.345, blue: 0.761)
+    }
+
+    private var symbol: String {
+        switch state {
+        case .upToDate: return "checkmark.circle"
+        case .downloaded: return "arrow.clockwise.circle.fill"
+        case .failed: return "exclamationmark.triangle"
+        default: return "arrow.down.circle"
+        }
+    }
 
     var body: some View {
-        let progress = min(max(expansion, 0), 1)
-        let widthProgress = min(progress / 0.74, 1)
-        let textProgress = max((progress - 0.74) / 0.26, 0)
-        let width = Self.collapsedWidth + (Self.expandedWidth(for: title) - Self.collapsedWidth) * widthProgress
+        HStack(spacing: 5) {
+            if state == .checking || state == .downloading {
+                UpdateSpinner(color: isPill ? foreground : .secondary)
+            } else {
+                Image(systemName: symbol)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(isPill || state == .failed ? foreground : Color.primary.opacity(hovered ? 0.80 : 0.45))
+                    .frame(width: 14, height: 14)
+            }
 
-        ZStack(alignment: .leading) {
-            Capsule()
-                .fill(Color.primary.opacity(0.09 * progress))
-
-            Image(systemName: "arrow.down.circle")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(.secondary)
-                .overlay {
-                    Image(systemName: "arrow.down.circle")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(Color.accentColor)
-                        .opacity(progress)
-                }
-                .frame(width: 16, height: 28)
-                .padding(.leading, 7)
-                .allowsHitTesting(false)
-
-            Text(verbatim: title)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
-                .fixedSize()
-                // The full label fades in only after the capsule has room for it.
-                // Reversing hover hides it before shrinking, so no glyph is sliced.
-                .opacity(textProgress)
-                .offset(x: 2 * (1 - textProgress))
-                .padding(.leading, 28)
-                .allowsHitTesting(false)
+            if let title {
+                Text(verbatim: title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(foreground)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .transition(.opacity)
+            }
         }
-        .frame(width: width, height: 28, alignment: .leading)
+        .padding(.horizontal, isPill ? 9 : 7)
+        .frame(width: isPill ? pillWidth : 28, height: 28, alignment: .center)
+        .background {
+            if isPill {
+                Capsule()
+                    .fill(tint.opacity(colorScheme == .dark ? 0.22 : 0.13))
+                    .overlay(Capsule().stroke(tint.opacity(colorScheme == .dark ? 0.45 : 0.32), lineWidth: 1))
+            } else if hovered {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(0.07))
+            }
+        }
         .clipShape(Capsule())
         .contentShape(Capsule())
+        .animation(reduceMotion ? .linear(duration: 0.18) : .timingCurve(0.34, 1.24, 0.5, 1, duration: 0.30), value: state)
         .accessibilityHidden(true)
+    }
+}
+
+private struct UpdateSpinner: View {
+    let color: Color
+    @State private var spinning = false
+
+    var body: some View {
+        Circle()
+            .trim(from: 0.18, to: 0.88)
+            .stroke(color, style: StrokeStyle(lineWidth: 2.4, lineCap: .round))
+            .frame(width: 14, height: 14)
+            .rotationEffect(.degrees(spinning ? 360 : 0))
+            .onAppear {
+                withAnimation(.linear(duration: 0.8).repeatForever(autoreverses: false)) { spinning = true }
+            }
+    }
+}
+
+private struct UpdateToolbarToastView: View {
+    let toast: UpdateToolbarToast
+    let language: AppLanguage
+
+    var body: some View {
+        Label(
+            toast.kind == .upToDate
+                ? (language == .english ? "You're up to date" : "已是最新版本")
+                : (language == .english ? "Unable to check for updates" : "暂时无法检查更新"),
+            systemImage: toast.kind == .upToDate ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+        )
+        .font(.system(size: 13, weight: .medium))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .shadow(color: .black.opacity(0.16), radius: 10, y: 4)
+        .accessibilityAddTraits(.isStaticText)
     }
 }
 
 struct RootView: View {
     @ObservedObject var store: AppStore
-    let checkForUpdates: () -> Void
-    var canCheckForUpdates: Bool = true
+    @ObservedObject var updater: ShioriUpdater
 
     @AppStorage("ui.appearance") private var appearanceRaw = AppearancePreference.system.rawValue
     @AppStorage("ui.language") private var languageRaw = AppLanguage.simplifiedChinese.rawValue
@@ -235,6 +343,16 @@ struct RootView: View {
         .preferredColorScheme(appearance.colorScheme)
         .environment(\.locale, language.locale)
         .toolbar { toolbarContent }
+        .overlay(alignment: .topTrailing) {
+            if let toast = updater.toolbarToast {
+                UpdateToolbarToastView(toast: toast, language: language)
+                    .padding(.top, 10)
+                    .padding(.trailing, 16)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .animation(.easeOut(duration: 0.18), value: toast.id)
+            }
+        }
+        .animation(.easeOut(duration: 0.20), value: updater.toolbarToast)
         .confirmationDialog("删除当前配置？", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("删除", role: .destructive) { store.removeSelectedGame() }
             Button("取消", role: .cancel) {}
@@ -296,12 +414,15 @@ struct RootView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
-            UpdateToolbarButton(
-                title: localized("更新"),
-                helpText: localized("检查并安装 Shiori 更新"),
-                isEnabled: canCheckForUpdates,
-                action: checkForUpdates
-            )
+            if !updater.toolbarState.isHidden {
+                UpdateToolbarButton(
+                    state: updater.toolbarState,
+                    language: language,
+                    isEnabled: updater.toolbarState.acceptsInteraction &&
+                        (updater.canCheckForUpdates || updater.toolbarState.isDownloaded),
+                    action: updater.checkForUpdatesFromToolbar
+                )
+            }
 
             Button {
                 refreshAllUserData()
@@ -389,7 +510,8 @@ struct RootView: View {
                 }
                 Spacer()
             }
-            .padding(10)
+            .padding(.vertical, 10)
+            .padding(.trailing, 10)
             .contentShape(Rectangle())
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -1621,7 +1743,7 @@ struct RootView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if let installStatus {
-                    steamInstallStatusBlock(installStatus, game: game)
+                    steamInstallStatusBlock(installStatus)
                 }
             }
 
@@ -1698,7 +1820,7 @@ struct RootView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if let installStatus {
-                    steamInstallStatusBlock(installStatus, game: game)
+                    steamInstallStatusBlock(installStatus)
                 }
             }
 
@@ -1746,10 +1868,7 @@ struct RootView: View {
         )
     }
 
-    private func steamInstallStatusBlock(_ status: SteamInstallStatus, game: SteamLibraryGame) -> some View {
-        // 预填充黄字提示：仅在“未（安装完成且成功运行过）”时显示；装好并运行过后隐藏。
-        let hasRun = store.wineSteamGameHasRun(game.appID)
-        let showEvidence = status.prefillEvidenceLabel != nil && !(status.isLaunchReady && hasRun)
+    private func steamInstallStatusBlock(_ status: SteamInstallStatus) -> some View {
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Image(systemName: "arrow.down.circle")
@@ -1765,7 +1884,7 @@ struct RootView: View {
                     .controlSize(.small)
                     .frame(maxWidth: 340)
             }
-            if showEvidence, let evidence = status.prefillEvidenceLabel {
+            if let evidence = status.prefillEvidenceLabel {
                 HStack(alignment: .top, spacing: 5) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.caption2)

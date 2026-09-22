@@ -46,6 +46,20 @@ final class WineSteamDockReopenPolicyTests: XCTestCase {
         ))
     }
 
+    func testClientEntryStartsNormallyWhenSteamIsNotRunning() {
+        XCTAssertEqual(
+            WineSteamDockReopenPolicy.clientEntryArguments(steamMainClientPIDs: []),
+            []
+        )
+    }
+
+    func testClientEntryRequestsMainWindowWhenSteamIsAlreadyRunning() {
+        XCTAssertEqual(
+            WineSteamDockReopenPolicy.clientEntryArguments(steamMainClientPIDs: [mainPID]),
+            ["steam://open/main"]
+        )
+    }
+
     func testRecognizesSteamMainClientFromWineCommandLineWithSpaces() {
         XCTAssertTrue(WineSteamDockReopenPolicy.isSteamMainClientCommandLine(
             #"C:\Program Files (x86)\Steam\Steam.exe -no-cef-sandbox -foreground"#

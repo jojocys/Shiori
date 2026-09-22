@@ -162,7 +162,7 @@ struct GameStoreFile: Codable {
     // Switch 运行所需，由用户自备（不随 App 分发）。可选以兼容旧库。
     var preferredKeysPath: String?
     var preferredFirmwarePath: String?
-    // 已成功启动过的 Wine Steam 游戏 AppID（安装完成 + 运行过 → 不再显示预填充黄字提示）。
+    // 已由 Shiori 确认成功启动过的 Wine Steam 游戏 AppID。
     var launchedWineSteamAppIDs: [String]?
 }
 

@@ -111,7 +111,12 @@ struct SteamInstallStatus: Hashable {
     }
 
     var isLaunchReady: Bool {
-        stateFlags == "4" && !hasDownloadingDir && !hasTempDir && !isPendingPrefillValidation
+        let downloadComplete = bytesToDownload == 0 || bytesDownloaded >= bytesToDownload
+        let stagingComplete = bytesToStage == 0 || bytesStaged >= bytesToStage
+        return stateFlags == "4"
+            && downloadComplete
+            && stagingComplete
+            && !isPendingPrefillValidation
     }
 
     var didCompleteLargeSteamDownloadAfterPrefill: Bool {
@@ -130,7 +135,7 @@ struct SteamInstallStatus: Hashable {
     }
 
     var prefillEvidenceNeedsAttention: Bool {
-        guard let prefillMetadata else { return false }
+        guard let prefillMetadata, !isLaunchReady else { return false }
         if didCompleteLargeSteamDownloadAfterPrefill { return true }
         if !installDir.isEmpty, installDir.caseInsensitiveCompare(prefillMetadata.installDir) != .orderedSame {
             return true
@@ -188,7 +193,9 @@ struct SteamInstallStatus: Hashable {
     }
 
     var prefillEvidenceLabel: String? {
-        guard let prefillMetadata else { return nil }
+        // Steam 已给出完整安装状态时，预填充只是历史来源，不再是当前状态。
+        // 即使 Steam 留下 downloading/temp 目录，也不继续显示“已预填充”黄字。
+        guard let prefillMetadata, !isLaunchReady else { return nil }
         var parts = ["Shiori 已预填充 \(prefillMetadata.copiedSizeLabel)"]
         if manifestPath.isEmpty {
             parts.append("等待在 Wine Steam 安装窗口确认")

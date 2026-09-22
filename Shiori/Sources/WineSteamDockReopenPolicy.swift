@@ -1,8 +1,15 @@
 import Foundation
 
 enum WineSteamDockReopenPolicy {
+    static let showMainWindowURL = "steam://open/main"
     static let activationDelayNanoseconds: UInt64 = 350_000_000
     static let requestCooldown: TimeInterval = 2
+
+    /// 顶部“启动/唤起”按钮共用这一策略：客户端已运行时必须显式发送
+    /// `steam://open/main`，否则再次执行 Steam.exe 只会把请求交给后台实例，窗口仍不出现。
+    static func clientEntryArguments(steamMainClientPIDs: Set<Int32>) -> [String] {
+        steamMainClientPIDs.isEmpty ? [] : [showMainWindowURL]
+    }
 
     static func shouldRequestReopen(
         activatedPID: Int32,

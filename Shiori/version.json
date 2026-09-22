@@ -1,6 +1,6 @@
 {
-  "build": 4,
-  "version": "0.2.2",
-  "notes": "可通过 Shiori 应用内更新按钮直接获取后续版本；优化了部分 UI。",
+  "build": 5,
+  "version": "0.2.3",
+  "notes": "改进更新提醒与 Wine Steam 窗口唤起，并修复完整下载后仍显示预填充状态的问题。",
   "url": "https://github.com/jojocys/Shiori/releases/latest"
 }

@@ -319,11 +319,61 @@ final class SteamLibraryTests: XCTestCase {
         let status = try XCTUnwrap(SteamLibraryManager.scanInstallStatuses(steamappsURLs: [wineSteamapps])["365"])
         XCTAssertTrue(status.isLaunchReady)
         XCTAssertTrue(status.didCompleteLargeSteamDownloadAfterPrefill)
-        XCTAssertTrue(status.prefillEvidenceNeedsAttention)
-        let evidence = try XCTUnwrap(status.prefillEvidenceLabel)
-        XCTAssertTrue(evidence.contains("Steam 已完成大额下载"))
-        XCTAssertTrue(evidence.contains("不能视为预填充复用成功"))
-        XCTAssertFalse(evidence.contains("建议暂停"))
+        XCTAssertFalse(status.prefillEvidenceNeedsAttention)
+        XCTAssertNil(status.prefillEvidenceLabel)
+    }
+
+    func testCompletedInstallIgnoresLeftoverSteamWorkDirectories() throws {
+        let fm = FileManager.default
+        let sourceRoot = tempRoot.appendingPathComponent("MacSteam/steamapps/common/Leftover Game", isDirectory: true)
+        try fm.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        try write("shared", to: sourceRoot.appendingPathComponent("shared.assets"))
+
+        let wineSteamapps = tempRoot.appendingPathComponent("WineSteam/steamapps", isDirectory: true)
+        let sourceGame = SteamLibraryGame(
+            id: "mac:370:\(sourceRoot.path)",
+            appID: "370",
+            name: "Leftover Game",
+            installDir: "Leftover Game",
+            libraryPath: "",
+            steamappsPath: "",
+            installPath: sourceRoot.path,
+            manifestPath: "",
+            sizeOnDisk: 6,
+            buildID: "",
+            stateFlags: "4",
+            source: .mac,
+            hasManifest: true,
+            isPreloadOnly: false
+        )
+        _ = try SteamLibraryManager.prefillWineSteam(from: sourceGame, to: wineSteamapps)
+
+        try write("""
+        "AppState"
+        {
+            "appid" "370"
+            "name" "Leftover Game"
+            "StateFlags" "4"
+            "installdir" "Leftover Game"
+            "LastUpdated" "123"
+            "buildid" "456"
+            "SizeOnDisk" "4096"
+            "BytesToDownload" "4096"
+            "BytesDownloaded" "4096"
+            "BytesToStage" "4096"
+            "BytesStaged" "4096"
+        }
+        """, to: wineSteamapps.appendingPathComponent("appmanifest_370.acf"))
+        try write("leftover", to: wineSteamapps.appendingPathComponent("downloading/370/stale.bin"))
+        try write("leftover", to: wineSteamapps.appendingPathComponent("temp/370/stale.bin"))
+
+        let status = try XCTUnwrap(SteamLibraryManager.scanInstallStatuses(steamappsURLs: [wineSteamapps])["370"])
+        XCTAssertTrue(status.hasDownloadingDir)
+        XCTAssertTrue(status.hasTempDir)
+        XCTAssertTrue(status.isLaunchReady)
+        XCTAssertEqual(status.activityLabel, "已安装")
+        XCTAssertNil(status.progressFraction)
+        XCTAssertNil(status.prefillEvidenceLabel)
     }
 
     func testPrefillRefusesExistingWineManifestForSameAppID() throws {
