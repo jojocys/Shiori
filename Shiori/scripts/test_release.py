@@ -115,6 +115,15 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             r.find_release([draft, dict(draft)], "0.2.2")
 
+    def testSameVisibleVersionCanReplaceAnOlderInternalBuild(self):
+        root = ET.Element("rss"); channel = ET.SubElement(root, "channel")
+        channel.extend([self.item("5", "0.2.3"), self.item("4", "0.2.2"), self.item("3", "0.2.1")])
+        self.assertEqual(r.remove_items_for_short_version(root, "0.2.3"), 1)
+        self.assertEqual(
+            [item.findtext(f"{{{r.NS}}}version") for item in channel.findall("item")],
+            ["4", "3"],
+        )
+
     def testRecordedExternalInputsDetectFileAndTreeChanges(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -1,5 +1,5 @@
 {
-  "build": 5,
+  "build": 6,
   "version": "0.2.3",
   "notes": "改进更新提醒与 Wine Steam 窗口唤起，并修复完整下载后仍显示预填充状态的问题。",
   "url": "https://github.com/jojocys/Shiori/releases/latest"

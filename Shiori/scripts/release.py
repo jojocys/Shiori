@@ -196,6 +196,18 @@ def parse_feed(path):
     return root
 
 
+def remove_items_for_short_version(feed, version):
+    channel = feed.find("./channel")
+    require(channel is not None, "Missing appcast channel")
+    matching = [
+        item for item in channel.findall("item")
+        if item.findtext(f"{{{NS}}}shortVersionString") == version
+    ]
+    for item in matching:
+        channel.remove(item)
+    return len(matching)
+
+
 def target_item(feed, build):
     items = [i for i in feed.findall("./channel/item") if i.findtext(f"{{{NS}}}version") == str(build)]
     require(len(items) == 1, "Expected exactly one item for target build")
@@ -288,7 +300,13 @@ def generate_feed(app, dmg, stage, history=None, test_mode=False, archive_url=No
         if history:
             previous = parse_feed(history)
             require(all(int(i.findtext(f"{{{NS}}}version")) < int(build) for i in previous.findall("./channel/item")), "Build must exceed every previous feed build")
-            shutil.copy2(history, workspace / "appcast.xml")
+            if remove_items_for_short_version(previous, version):
+                atomic_write(
+                    workspace / "appcast.xml",
+                    ET.tostring(previous, encoding="utf-8", xml_declaration=True),
+                )
+            else:
+                shutil.copy2(history, workspace / "appcast.xml")
         signing = ["--account", os.environ.get("SPARKLE_ACCOUNT", "shiori-jojocys")]
         if os.environ.get("SPARKLE_PRIVATE_KEY_FILE"):
             signing = ["--ed-key-file", os.environ["SPARKLE_PRIVATE_KEY_FILE"]]
@@ -321,7 +339,7 @@ def verify(app, dmg, feed_path, test_mode=False, feed_url=FEED, archive_url=None
     require(info.get("SUFeedURL") == feed_url, "Feed URL mismatch")
     validate_url(feed_url, test_mode)
     require(info["SUPublicEDKey"] == PUBLIC_KEY.read_text().strip(), "App key differs from repository public key")
-    for key, expected in {"SUEnableAutomaticChecks": True, "SUAutomaticallyUpdate": False, "SUAllowsAutomaticUpdates": False, "SUVerifyUpdateBeforeExtraction": True}.items():
+    for key, expected in {"SUEnableAutomaticChecks": False, "SUAutomaticallyUpdate": False, "SUAllowsAutomaticUpdates": False, "SUVerifyUpdateBeforeExtraction": True}.items():
         require(info.get(key) is expected, f"Incorrect {key}")
     require(info.get("SUScheduledCheckInterval") == 86400, "Unexpected check interval")
     require(info.get("LSMinimumSystemVersion") == "13.0", "Unsupported minimum OS")

@@ -32,4 +32,18 @@ final class ShioriUpdaterStateTests: XCTestCase {
             .available(version: "1.2.0")
         )
     }
+
+    func testSilentAutomaticChecksUseA24HourSchedule() {
+        let now = Date(timeIntervalSince1970: 100_000)
+        XCTAssertEqual(SilentUpdateSchedule.interval, 86_400)
+        XCTAssertEqual(SilentUpdateSchedule.delaySinceLastCheck(nil, now: now), 0)
+        XCTAssertEqual(
+            SilentUpdateSchedule.delaySinceLastCheck(now.addingTimeInterval(-100), now: now),
+            86_300
+        )
+        XCTAssertEqual(
+            SilentUpdateSchedule.delaySinceLastCheck(now.addingTimeInterval(-90_000), now: now),
+            0
+        )
+    }
 }

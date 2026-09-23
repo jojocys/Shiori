@@ -186,7 +186,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <key>SUPublicEDKey</key>
   <string>$SPARKLE_PUBLIC_KEY</string>
   <key>SUEnableAutomaticChecks</key>
-  <true/>
+  <false/>
   <key>SUAllowsAutomaticUpdates</key>
   <false/>
   <key>SUAutomaticallyUpdate</key>

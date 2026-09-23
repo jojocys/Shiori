@@ -49,13 +49,26 @@ struct UpdateToolbarToast: Equatable, Identifiable {
     }
 }
 
+enum SilentUpdateSchedule {
+    static let interval: TimeInterval = 24 * 60 * 60
+
+    static func delaySinceLastCheck(_ lastCheck: Date?, now: Date = Date()) -> TimeInterval {
+        guard let lastCheck else { return 0 }
+        return max(0, interval - now.timeIntervalSince(lastCheck))
+    }
+}
+
 /// Sparkle controller and the toolbar's update state share the app lifetime.
 @MainActor
 final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @preconcurrency SPUStandardUserDriverDelegate {
+    private static let lastSilentCheckKey = "ShioriUpdater.lastSilentCheckDate"
+    private static let busyRetryInterval: TimeInterval = 60
+
     private var controller: SPUStandardUpdaterController?
     private var observation: NSKeyValueObservation?
     private var resumeInstallation: (() -> Void)?
     private var availableUpdateVersion: String?
+    private var automaticCheckTask: Task<Void, Never>?
     private var stateTask: Task<Void, Never>?
     private var toastTask: Task<Void, Never>?
 
@@ -76,12 +89,48 @@ final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @prec
         observation = controller?.updater.observe(\.canCheckForUpdates, options: [.initial, .new]) { [weak self] _, change in
             Task { @MainActor in self?.canCheckForUpdates = change.newValue ?? false }
         }
-        if startingUpdater { controller?.startUpdater() }
+        if startingUpdater {
+            controller?.startUpdater()
+            configureSilentAutomaticChecks()
+        }
     }
 
     deinit {
+        automaticCheckTask?.cancel()
         stateTask?.cancel()
         toastTask?.cancel()
+    }
+
+    /// Sparkle's scheduled checks use its standard alert window. Shiori owns the
+    /// 24-hour schedule instead and only performs information probes, so an
+    /// automatic result can update the toolbar without presenting a window.
+    private func configureSilentAutomaticChecks() {
+        guard let updater = controller?.updater else { return }
+        updater.automaticallyChecksForUpdates = false
+        let lastCheck = UserDefaults.standard.object(forKey: Self.lastSilentCheckKey) as? Date
+        scheduleSilentAutomaticCheck(after: SilentUpdateSchedule.delaySinceLastCheck(lastCheck))
+    }
+
+    private func scheduleSilentAutomaticCheck(after delay: TimeInterval) {
+        automaticCheckTask?.cancel()
+        automaticCheckTask = Task { [weak self] in
+            if delay > 0 {
+                try? await Task.sleep(for: .seconds(delay))
+            }
+            guard !Task.isCancelled else { return }
+            self?.performSilentAutomaticCheck()
+        }
+    }
+
+    private func performSilentAutomaticCheck() {
+        guard let updater = controller?.updater else { return }
+        guard updater.canCheckForUpdates else {
+            scheduleSilentAutomaticCheck(after: Self.busyRetryInterval)
+            return
+        }
+        UserDefaults.standard.set(Date(), forKey: Self.lastSilentCheckKey)
+        probeForUpdates()
+        scheduleSilentAutomaticCheck(after: SilentUpdateSchedule.interval)
     }
 
     /// Toolbar checks are informational: no Sparkle window is shown merely to say
