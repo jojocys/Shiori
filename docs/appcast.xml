@@ -3,6 +3,25 @@
     <channel>
         <title>Shiori</title>
         <item>
+            <title>0.2.5</title>
+            <pubDate>Fri, 16 Oct 2026 19:05:20 +0800</pubDate>
+            <sparkle:version>11</sparkle:version>
+            <sparkle:shortVersionString>0.2.5</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# Shiori 0.2.5
+
+本版本修复应用内更新已下载完成后，点击“安装并重启应用”却没有继续安装的问题。
+
+- 点击安装后自动完成安全检查并继续安装，无需再次操作菜单或工具栏。
+- 游戏或 Wine Steam 仍在运行、无法确认运行状态或配置保存失败时暂缓安装，并提示如何重试。
+- 防止重复点击触发多次安装；安装取消或会话被替换后，不再执行旧安装请求。
+
+现有游戏、配置和存档继续保留。此修复在安装 0.2.5 后生效：如果旧版本的安装窗口已经无响应，请先保存并退出相关游戏或 Wine Steam，再点击 Shiori 主窗口的“重启以更新”，或从应用菜单选择“检查更新…”继续。也可退出 Shiori 后，通过本版本 DMG 手动替换应用。
+]]></description>
+            <enclosure url="https://github.com/jojocys/Shiori/releases/download/v0.2.5/Shiori-0.2.5.dmg" length="551545092" type="application/octet-stream" sparkle:edSignature="u2FFo3+1ApWXzH4phxpVN9aHTZOtPNNn35i4dTGPhawrcmu/zDNKQxmcTSo9e+p4nZj5vU36jh73xSVI2Eo/CA=="/>
+        </item>
+        <item>
             <title>0.2.4</title>
             <pubDate>Fri, 16 Oct 2026 17:55:52 +0800</pubDate>
             <sparkle:version>10</sparkle:version>
@@ -52,27 +71,6 @@
 - 窗口 UI：部分 UI 优化。
 ]]></description>
             <enclosure url="https://github.com/jojocys/Shiori/releases/download/v0.2.3/Shiori-0.2.3.dmg" length="484573214" type="application/octet-stream" sparkle:edSignature="b7qobnBFSOcrm91MniIpMmNmSUSHuIKTY7VIqw2LO+fHHzexhddMlx/SSOqEWXaReI0HbBKVhftSQUGfPGP+DQ=="/>
-        </item>
-        <item>
-            <title>0.2.2</title>
-            <pubDate>Tue, 15 Sep 2026 08:45:04 +0800</pubDate>
-            <sparkle:version>4</sparkle:version>
-            <sparkle:shortVersionString>0.2.2</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[# Shiori 0.2.2
-
-## **重点：现在可以直接通过 Shiori 更新**
-
-安装本版本后，后续版本可直接通过 Shiori 标题栏中的更新按钮检查、下载并完成替换，无需打开 GitHub 手动下载安装包。
-
-- 使用 GitHub Release 托管统一的 DMG 更新包。
-- 更新前自动保存本地游戏配置，并使用 Ed25519 签名验证安装包。
-- 优化了部分 UI。
-
-支持 macOS 13 及以上的 Apple Silicon Mac。当前构建使用 ad-hoc 应用签名。
-]]></description>
-            <enclosure url="https://github.com/jojocys/Shiori/releases/download/v0.2.2/Shiori-0.2.2.dmg" length="485588684" type="application/octet-stream" sparkle:edSignature="esuC0M55JYPFdCwNhrT5pVydVH9Z/T3n7ilAfS4uyGb/Sa0XBf/sdSqeuxZ57uHgG+BuZYFQNxvjlSfNn/xGDg=="/>
         </item>
     </channel>
 </rss>
