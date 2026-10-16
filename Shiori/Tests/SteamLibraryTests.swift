@@ -64,7 +64,7 @@ final class SteamLibraryTests: XCTestCase {
         XCTAssertEqual(games.count, 1)
 
         let wineSteamapps = tempRoot.appendingPathComponent("WineSteam/steamapps", isDirectory: true)
-        let report = try SteamLibraryManager.prefillWineSteam(from: games[0], to: wineSteamapps)
+        let report = try SteamLibraryManager.prefillWineSteam(from: games[0], to: wineSteamapps, protectedRoots: [tempRoot.appendingPathComponent("MacSteam/steamapps")], allowedRoots: [wineSteamapps])
         let target = wineSteamapps.appendingPathComponent("common/Sample VN", isDirectory: true)
 
         XCTAssertGreaterThan(report.copiedFiles, 0)
@@ -98,12 +98,12 @@ final class SteamLibraryTests: XCTestCase {
         XCTAssertEqual(preloadedGames.first?.hasManifest, true)
 
         let statuses = SteamLibraryManager.scanInstallStatuses(steamappsURLs: [wineSteamapps])
-        XCTAssertEqual(statuses["100"]?.prefillMetadata?.copiedBytes, report.copiedBytes)
-        XCTAssertEqual(statuses["100"]?.buildID, "1")
-        XCTAssertEqual(statuses["100"]?.activityLabel, "等待 Steam 校验")
-        XCTAssertEqual(statuses["100"]?.hasDownloadingDir, false)
-        XCTAssertEqual(statuses["100"]?.isLaunchReady, false)
-        XCTAssertTrue(try XCTUnwrap(statuses["100"]?.prefillEvidenceLabel).contains("已写入 Wine manifest"))
+        XCTAssertEqual(statuses[SteamLibraryGame.installationIdentity(appID: "100", steamappsPath: wineSteamapps.path)]?.prefillMetadata?.copiedBytes, report.copiedBytes)
+        XCTAssertEqual(statuses[SteamLibraryGame.installationIdentity(appID: "100", steamappsPath: wineSteamapps.path)]?.buildID, "1")
+        XCTAssertEqual(statuses[SteamLibraryGame.installationIdentity(appID: "100", steamappsPath: wineSteamapps.path)]?.activityLabel, "等待 Steam 校验")
+        XCTAssertEqual(statuses[SteamLibraryGame.installationIdentity(appID: "100", steamappsPath: wineSteamapps.path)]?.hasDownloadingDir, false)
+        XCTAssertEqual(statuses[SteamLibraryGame.installationIdentity(appID: "100", steamappsPath: wineSteamapps.path)]?.isLaunchReady, false)
+        XCTAssertTrue(try XCTUnwrap(statuses[SteamLibraryGame.installationIdentity(appID: "100", steamappsPath: wineSteamapps.path)]?.prefillEvidenceLabel).contains("已写入 Wine manifest"))
     }
 
     func testPrefillCleansStaleDownloadStateAndStatusReadsSteamProgress() throws {
@@ -139,7 +139,7 @@ final class SteamLibraryTests: XCTestCase {
             isPreloadOnly: false
         )
 
-        _ = try SteamLibraryManager.prefillWineSteam(from: sourceGame, to: wineSteamapps)
+        _ = try SteamLibraryManager.prefillWineSteam(from: sourceGame, to: wineSteamapps, protectedRoots: [tempRoot.appendingPathComponent("MacSteam/steamapps")], allowedRoots: [wineSteamapps])
 
         XCTAssertFalse(fm.fileExists(atPath: staleDownloading.path))
         XCTAssertFalse(fm.fileExists(atPath: staleTemp.path))
@@ -163,7 +163,7 @@ final class SteamLibraryTests: XCTestCase {
         try fm.createDirectory(at: activeDownloading, withIntermediateDirectories: true)
         try write("chunk", to: activeDownloading.appendingPathComponent("chunk.bin"))
 
-        let status = try XCTUnwrap(SteamLibraryManager.scanInstallStatuses(steamappsURLs: [wineSteamapps])["300"])
+        let status = try XCTUnwrap(SteamLibraryManager.scanInstallStatuses(steamappsURLs: [wineSteamapps])[SteamLibraryGame.installationIdentity(appID: "300", steamappsPath: wineSteamapps.path)])
         XCTAssertEqual(status.bytesToDownload, 1000)
         XCTAssertEqual(status.bytesDownloaded, 250)
         XCTAssertEqual(status.bytesToStage, 2000)
@@ -202,7 +202,7 @@ final class SteamLibraryTests: XCTestCase {
             hasManifest: true,
             isPreloadOnly: false
         )
-        _ = try SteamLibraryManager.prefillWineSteam(from: sourceGame, to: wineSteamapps)
+        _ = try SteamLibraryManager.prefillWineSteam(from: sourceGame, to: wineSteamapps, protectedRoots: [tempRoot.appendingPathComponent("MacSteam/steamapps")], allowedRoots: [wineSteamapps])
 
         try write("""
         "AppState"
@@ -217,7 +217,7 @@ final class SteamLibraryTests: XCTestCase {
         }
         """, to: wineSteamapps.appendingPathComponent("appmanifest_350.acf"))
 
-        let status = try XCTUnwrap(SteamLibraryManager.scanInstallStatuses(steamappsURLs: [wineSteamapps])["350"])
+        let status = try XCTUnwrap(SteamLibraryManager.scanInstallStatuses(steamappsURLs: [wineSteamapps])[SteamLibraryGame.installationIdentity(appID: "350", steamappsPath: wineSteamapps.path)])
         let evidence = try XCTUnwrap(status.prefillEvidenceLabel)
         XCTAssertTrue(evidence.contains("目录不一致"))
         XCTAssertTrue(evidence.contains("预填充在 Mac Dir"))
@@ -247,7 +247,7 @@ final class SteamLibraryTests: XCTestCase {
             hasManifest: true,
             isPreloadOnly: false
         )
-        _ = try SteamLibraryManager.prefillWineSteam(from: sourceGame, to: wineSteamapps)
+        _ = try SteamLibraryManager.prefillWineSteam(from: sourceGame, to: wineSteamapps, protectedRoots: [tempRoot.appendingPathComponent("MacSteam/steamapps")], allowedRoots: [wineSteamapps])
 
         let target = wineSteamapps.appendingPathComponent("common/Risk Game", isDirectory: true)
         try fm.removeItem(at: target)
@@ -269,7 +269,7 @@ final class SteamLibraryTests: XCTestCase {
         }
         """, to: wineSteamapps.appendingPathComponent("appmanifest_360.acf"))
 
-        let status = try XCTUnwrap(SteamLibraryManager.scanInstallStatuses(steamappsURLs: [wineSteamapps])["360"])
+        let status = try XCTUnwrap(SteamLibraryManager.scanInstallStatuses(steamappsURLs: [wineSteamapps])[SteamLibraryGame.installationIdentity(appID: "360", steamappsPath: wineSteamapps.path)])
         let evidence = try XCTUnwrap(status.prefillEvidenceLabel)
         XCTAssertTrue(evidence.contains("复用率可能偏低"))
         XCTAssertTrue(evidence.contains("建议暂停"))
@@ -299,7 +299,7 @@ final class SteamLibraryTests: XCTestCase {
             hasManifest: true,
             isPreloadOnly: false
         )
-        _ = try SteamLibraryManager.prefillWineSteam(from: sourceGame, to: wineSteamapps)
+        _ = try SteamLibraryManager.prefillWineSteam(from: sourceGame, to: wineSteamapps, protectedRoots: [tempRoot.appendingPathComponent("MacSteam/steamapps")], allowedRoots: [wineSteamapps])
 
         try write("""
         "AppState"
@@ -316,7 +316,7 @@ final class SteamLibraryTests: XCTestCase {
         }
         """, to: wineSteamapps.appendingPathComponent("appmanifest_365.acf"))
 
-        let status = try XCTUnwrap(SteamLibraryManager.scanInstallStatuses(steamappsURLs: [wineSteamapps])["365"])
+        let status = try XCTUnwrap(SteamLibraryManager.scanInstallStatuses(steamappsURLs: [wineSteamapps])[SteamLibraryGame.installationIdentity(appID: "365", steamappsPath: wineSteamapps.path)])
         XCTAssertTrue(status.isLaunchReady)
         XCTAssertTrue(status.didCompleteLargeSteamDownloadAfterPrefill)
         XCTAssertFalse(status.prefillEvidenceNeedsAttention)
@@ -346,7 +346,7 @@ final class SteamLibraryTests: XCTestCase {
             hasManifest: true,
             isPreloadOnly: false
         )
-        _ = try SteamLibraryManager.prefillWineSteam(from: sourceGame, to: wineSteamapps)
+        _ = try SteamLibraryManager.prefillWineSteam(from: sourceGame, to: wineSteamapps, protectedRoots: [tempRoot.appendingPathComponent("MacSteam/steamapps")], allowedRoots: [wineSteamapps])
 
         try write("""
         "AppState"
@@ -367,7 +367,7 @@ final class SteamLibraryTests: XCTestCase {
         try write("leftover", to: wineSteamapps.appendingPathComponent("downloading/370/stale.bin"))
         try write("leftover", to: wineSteamapps.appendingPathComponent("temp/370/stale.bin"))
 
-        let status = try XCTUnwrap(SteamLibraryManager.scanInstallStatuses(steamappsURLs: [wineSteamapps])["370"])
+        let status = try XCTUnwrap(SteamLibraryManager.scanInstallStatuses(steamappsURLs: [wineSteamapps])[SteamLibraryGame.installationIdentity(appID: "370", steamappsPath: wineSteamapps.path)])
         XCTAssertTrue(status.hasDownloadingDir)
         XCTAssertTrue(status.hasTempDir)
         XCTAssertTrue(status.isLaunchReady)
@@ -401,7 +401,7 @@ final class SteamLibraryTests: XCTestCase {
             isPreloadOnly: false
         )
 
-        XCTAssertThrowsError(try SteamLibraryManager.prefillWineSteam(from: sourceGame, to: wineSteamapps))
+        XCTAssertThrowsError(try SteamLibraryManager.prefillWineSteam(from: sourceGame, to: wineSteamapps, protectedRoots: [tempRoot.appendingPathComponent("MacSteam/steamapps")], allowedRoots: [wineSteamapps]))
     }
 
     func testPrefillRefusesUnknownNonEmptyTargetDirectory() throws {
@@ -431,7 +431,7 @@ final class SteamLibraryTests: XCTestCase {
             isPreloadOnly: false
         )
 
-        XCTAssertThrowsError(try SteamLibraryManager.prefillWineSteam(from: sourceGame, to: wineSteamapps))
+        XCTAssertThrowsError(try SteamLibraryManager.prefillWineSteam(from: sourceGame, to: wineSteamapps, protectedRoots: [tempRoot.appendingPathComponent("MacSteam/steamapps")], allowedRoots: [wineSteamapps]))
         XCTAssertTrue(fm.fileExists(atPath: dirtyTarget.appendingPathComponent("old.bin").path))
     }
 
@@ -514,7 +514,7 @@ final class SteamLibraryTests: XCTestCase {
             isPreloadOnly: false
         )
 
-        try SteamLibraryManager.deleteWineGame(game)
+        try SteamLibraryManager.deleteWineGame(game, protectedRoots: [macSteamapps], allowedRoots: [wineSteamapps])
 
         XCTAssertFalse(fm.fileExists(atPath: manifest.path))
         XCTAssertFalse(fm.fileExists(atPath: install.path))
@@ -542,7 +542,7 @@ final class SteamLibraryTests: XCTestCase {
             under: [macSteamapps]
         )
 
-        XCTAssertEqual(filtered, [wineSteamapps.standardizedFileURL])
+        XCTAssertEqual(filtered.map(\.path), [SteamLibraryPathSafety.canonical(wineSteamapps).path])
     }
 
     func testSteamworksCommonRedistributablesIsNotShownAsAGame() throws {
@@ -571,7 +571,151 @@ final class SteamLibraryTests: XCTestCase {
         let statuses = SteamLibraryManager.scanInstallStatuses(steamappsURLs: [steamapps])
 
         XCTAssertTrue(games.isEmpty)
-        XCTAssertNil(statuses["228980"])
+        XCTAssertNil(statuses[SteamLibraryGame.installationIdentity(appID: "228980", steamappsPath: steamapps.path)])
+    }
+
+    func testSameAppIDInDifferentLibrariesKeepsIndependentInstallStatuses() throws {
+        let readyLibrary = tempRoot.appendingPathComponent("ready/steamapps")
+        let pendingLibrary = tempRoot.appendingPathComponent("pending/steamapps")
+        let ready = try safetyFixture(in: readyLibrary)
+        let pending = try safetyFixture(in: pendingLibrary)
+        let pendingManifest = try String(contentsOfFile: pending.manifestPath)
+            .replacingOccurrences(of: "\"StateFlags\" \"4\"", with: "\"StateFlags\" \"2\"")
+        try write(pendingManifest, to: URL(fileURLWithPath: pending.manifestPath))
+        let statuses = SteamLibraryManager.scanInstallStatuses(steamappsURLs: [readyLibrary, pendingLibrary])
+        XCTAssertEqual(statuses.count, 2)
+        XCTAssertTrue(try XCTUnwrap(statuses[ready.installationIdentity]).isLaunchReady)
+        XCTAssertFalse(try XCTUnwrap(statuses[pending.installationIdentity]).isLaunchReady)
+        let alias = tempRoot.appendingPathComponent("ready-alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: readyLibrary)
+        XCTAssertEqual(ready.installationIdentity, SteamLibraryGame.installationIdentity(appID: ready.appID, steamappsPath: alias.path))
+    }
+
+    func testCanonicalLibraryFilteringExcludesNativeAliasesAndDeduplicatesWineAliases() throws {
+        let fm = FileManager.default
+        let native = tempRoot.appendingPathComponent("native/steamapps")
+        let wine = tempRoot.appendingPathComponent("wine/steamapps")
+        try fm.createDirectory(at: native, withIntermediateDirectories: true)
+        try fm.createDirectory(at: wine, withIntermediateDirectories: true)
+        let nativeAlias = tempRoot.appendingPathComponent("native-alias")
+        let wineAlias = tempRoot.appendingPathComponent("wine-alias")
+        try fm.createSymbolicLink(at: nativeAlias, withDestinationURL: native)
+        try fm.createSymbolicLink(at: wineAlias, withDestinationURL: wine)
+        let filtered = SteamLibraryManager.excludingSteamappsURLs([nativeAlias, wine, wineAlias], under: [native])
+        XCTAssertEqual(filtered.map(\.path), [SteamLibraryPathSafety.canonical(wine).path])
+    }
+
+    func testDeleteAndPrefillRefuseNativeLibraryThroughApprovedAlias() throws {
+        let fm = FileManager.default
+        let native = tempRoot.appendingPathComponent("native/steamapps")
+        let game = try safetyFixture(in: native)
+        let alias = tempRoot.appendingPathComponent("native-alias")
+        try fm.createSymbolicLink(at: alias, withDestinationURL: native)
+        var aliasedGame = game
+        aliasedGame.steamappsPath = alias.path
+        aliasedGame.installPath = alias.appendingPathComponent("common/Sample").path
+        aliasedGame.manifestPath = alias.appendingPathComponent("appmanifest_100.acf").path
+        XCTAssertThrowsError(try SteamLibraryManager.deleteWineGame(aliasedGame,
+            protectedRoots: [native], allowedRoots: [alias]))
+        XCTAssertThrowsError(try SteamLibraryManager.prefillWineSteam(from: game, to: alias,
+            protectedRoots: [native], allowedRoots: [alias]))
+        XCTAssertTrue(fm.fileExists(atPath: game.manifestPath))
+        XCTAssertEqual(try String(contentsOfFile: game.installPath + "/payload.dat"), "protected payload")
+    }
+
+    func testMutationRequiresIndependentLibraryAuthorization() throws {
+        let wine = tempRoot.appendingPathComponent("unapproved/steamapps")
+        let game = try safetyFixture(in: wine)
+        let approved = tempRoot.appendingPathComponent("approved/steamapps")
+        XCTAssertThrowsError(try SteamLibraryManager.deleteWineGame(game, protectedRoots: [], allowedRoots: [approved]))
+        XCTAssertThrowsError(try SteamLibraryManager.prefillWineSteam(from: game, to: wine,
+            protectedRoots: [], allowedRoots: [approved]))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: game.manifestPath))
+    }
+
+    func testDeleteRejectsForgedInstallManifestAndTraversalPathsBeforeMutation() throws {
+        let wine = tempRoot.appendingPathComponent("wine/steamapps")
+        let game = try safetyFixture(in: wine)
+        let outside = tempRoot.appendingPathComponent("outside.dat")
+        try write("outside", to: outside)
+        var forged = game
+        forged.installPath = outside.path
+        XCTAssertThrowsError(try SteamLibraryManager.deleteWineGame(forged, protectedRoots: [], allowedRoots: [wine]))
+        forged = game
+        forged.manifestPath = outside.path
+        XCTAssertThrowsError(try SteamLibraryManager.deleteWineGame(forged, protectedRoots: [], allowedRoots: [wine]))
+        for traversal in ["../outside", "..\\outside", "", ".", ".."] {
+            forged = game
+            forged.installDir = traversal
+            XCTAssertThrowsError(try SteamLibraryManager.deleteWineGame(forged, protectedRoots: [], allowedRoots: [wine]))
+            XCTAssertThrowsError(try SteamLibraryManager.prefillWineSteam(from: forged, to: wine,
+                protectedRoots: [], allowedRoots: [wine]))
+        }
+        forged = game
+        forged.appID = "../100"
+        XCTAssertThrowsError(try SteamLibraryManager.deleteWineGame(forged, protectedRoots: [], allowedRoots: [wine]))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: game.manifestPath))
+        XCTAssertEqual(try String(contentsOf: outside), "outside")
+    }
+
+    func testDeletePreflightsEveryLinkedCacheBeforeRemovingManifest() throws {
+        let fm = FileManager.default
+        for (index, relative) in ["common", "downloading", "temp", "shadercache", "compatdata",
+                                  "workshop/content", "depotcache", "../depotcache", ".shiori-prefill"].enumerated() {
+            let wine = tempRoot.appendingPathComponent("case-\(index)/steamapps")
+            let game = try safetyFixture(in: wine)
+            let escaped = tempRoot.appendingPathComponent("outside-\(index)")
+            try write("outside", to: escaped.appendingPathComponent("100/sentinel.dat"))
+            let link = wine.appendingPathComponent(relative).standardizedFileURL
+            if fm.fileExists(atPath: link.path) { try fm.removeItem(at: link) }
+            try fm.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fm.createSymbolicLink(at: link, withDestinationURL: escaped)
+            XCTAssertThrowsError(try SteamLibraryManager.deleteWineGame(game, protectedRoots: [], allowedRoots: [wine]), relative)
+            XCTAssertTrue(fm.fileExists(atPath: game.manifestPath), relative)
+            XCTAssertEqual(try String(contentsOf: escaped.appendingPathComponent("100/sentinel.dat")), "outside", relative)
+        }
+    }
+
+    func testDeleteRejectsLinkedManifestAndDepotFileBeforeAnyRemoval() throws {
+        let fm = FileManager.default
+        for (index, relative) in ["appmanifest_100.acf", "depotcache/100_1.manifest", "../depotcache/100_1.manifest"].enumerated() {
+            let wine = tempRoot.appendingPathComponent("file-case-\(index)/steamapps")
+            let game = try safetyFixture(in: wine)
+            let externalFile = tempRoot.appendingPathComponent("outside-\(index).dat")
+            try write("outside", to: externalFile)
+            let link = wine.appendingPathComponent(relative).standardizedFileURL
+            if fm.fileExists(atPath: link.path) { try fm.removeItem(at: link) }
+            try fm.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fm.createSymbolicLink(at: link, withDestinationURL: externalFile)
+            XCTAssertThrowsError(try SteamLibraryManager.deleteWineGame(game, protectedRoots: [], allowedRoots: [wine]), relative)
+            XCTAssertTrue(fm.fileExists(atPath: game.installPath + "/payload.dat"), relative)
+            XCTAssertEqual(try String(contentsOf: externalFile), "outside", relative)
+        }
+    }
+
+    func testPrefillRejectsLinkedTargetAndMetadataBeforeCleaningDownloads() throws {
+        let fm = FileManager.default
+        let mac = tempRoot.appendingPathComponent("source/steamapps")
+        let source = try safetyFixture(in: mac)
+        for (index, relative) in ["common", "temp", ".shiori-prefill", "appmanifest_100.acf"].enumerated() {
+            let wine = tempRoot.appendingPathComponent("prefill-case-\(index)/steamapps")
+            try write("download", to: wine.appendingPathComponent("downloading/100/keep.dat"))
+            let escaped = tempRoot.appendingPathComponent("prefill-outside-\(index)")
+            try write("outside", to: escaped.appendingPathComponent("100/keep.dat"))
+            let link = wine.appendingPathComponent(relative)
+            try fm.createSymbolicLink(at: link, withDestinationURL: escaped)
+            XCTAssertThrowsError(try SteamLibraryManager.prefillWineSteam(from: source, to: wine,
+                protectedRoots: [mac], allowedRoots: [wine]), relative)
+            XCTAssertEqual(try String(contentsOf: wine.appendingPathComponent("downloading/100/keep.dat")), "download", relative)
+            XCTAssertEqual(try String(contentsOf: escaped.appendingPathComponent("100/keep.dat")), "outside", relative)
+        }
+    }
+
+    private func safetyFixture(in steamapps: URL) throws -> SteamLibraryGame {
+        try write("protected payload", to: steamapps.appendingPathComponent("common/Sample/payload.dat"))
+        try write("\"AppState\"\n{\n\"appid\" \"100\"\n\"name\" \"Sample\"\n\"installdir\" \"Sample\"\n\"StateFlags\" \"4\"\n}",
+                  to: steamapps.appendingPathComponent("appmanifest_100.acf"))
+        return try XCTUnwrap(SteamLibraryManager.scanWineGames(steamappsURLs: [steamapps]).first)
     }
 
     private func write(_ text: String, to url: URL) throws {

@@ -98,6 +98,12 @@ enum GameLauncher {
         env["WINEDEBUG"] = "-all"
         env["LANG"] = locale
         env["LC_ALL"] = locale
+        if let adapter = WineDockIcons.adapter {
+            let manifest = try? WineDockIcons.prepare(prefix: prefixURL,
+                gameExecutables: [exeURL],
+                cache: logsDir.deletingLastPathComponent().appendingPathComponent("icons/wine-dock", isDirectory: true))
+            env = WineDockIcons.environment(env, library: adapter, manifest: manifest)
+        }
         process.environment = env
         process.standardOutput = fileHandle
         process.standardError = fileHandle
@@ -135,23 +141,40 @@ enum GameLauncher {
 
         let process = Process()
         var note = ""
+        let bundled = SwitchRuntime.resolveBundledEmulator()
+        let bundledExecutable = bundled.flatMap { SwitchRuntime.executable(in: $0) }
+        let missingScriptEmulator = !game.launchScriptPath.isEmpty
+            && SwitchRuntime.launchScriptHasMissingEmulator(URL(fileURLWithPath: game.launchScriptPath))
 
-        if !game.launchScriptPath.isEmpty, fm.fileExists(atPath: game.launchScriptPath) {
+        if !game.launchScriptPath.isEmpty, fm.fileExists(atPath: game.launchScriptPath),
+           !(missingScriptEmulator && bundledExecutable != nil) {
             // 1) 用户现成脚本：完整设置（含 mod / 汉化），最忠实
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
             process.arguments = [game.launchScriptPath]
             note = "SCRIPT=\(game.launchScriptPath)"
-        } else if let bundled = SwitchRuntime.resolveBundledEmulator(),
-                  let exec = SwitchRuntime.executable(in: bundled),
+        } else if let bundled, let exec = bundledExecutable,
                   let dataDir {
             // 2) 内置模拟器 + 受管数据目录（铺入用户自备 keys/固件）→ 真正的"一键"
             guard !game.romPath.isEmpty, fm.fileExists(atPath: game.romPath) else {
                 throw GameLauncherError.romMissing
             }
-            SwitchRuntime.prepareDataDir(dataDir, keysPath: keysPath, firmwarePath: firmwarePath)
-            process.executableURL = exec
-            process.arguments = ["--root-data-dir", dataDir.path, game.romPath]
-            note = "EMULATOR(bundled)=\(bundled.path)\nDATA=\(dataDir.path)\nROM=\(game.romPath)"
+            let runtimeData = SwitchRuntime.dataDirectory(managed: dataDir, keysPath: keysPath, firmwarePath: firmwarePath)
+            if runtimeData == dataDir {
+                try SwitchRuntime.prepareDataDir(dataDir, keysPath: keysPath, firmwarePath: firmwarePath)
+            }
+            if exec.lastPathComponent == "ShioriSwitch" {
+                // Launch Services activates accessory apps reliably and the
+                // signed wrapper applies the embedded-only Dock adapter.
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                process.arguments = ["-n", "-a", bundled.path,
+                                     "--stdout", logURL.path, "--stderr", logURL.path,
+                                     "--args", "--root-data-dir", runtimeData.path, game.romPath]
+            } else {
+                process.executableURL = exec
+                process.arguments = ["--root-data-dir", runtimeData.path, game.romPath]
+            }
+            note = "EMULATOR(bundled)=\(bundled.path)\nDATA=\(runtimeData.path)\nROM=\(game.romPath)"
+            if missingScriptEmulator { note += "\nFALLBACK=启动脚本引用的模拟器已不存在，使用内置模拟器" }
         } else if !game.emulatorAppPath.isEmpty, fm.fileExists(atPath: game.emulatorAppPath) {
             // 3) 用户已装的模拟器：open -n <模拟器.app> --args <rom>，适配 Ryujinx / yuzu 系等
             guard !game.romPath.isEmpty, fm.fileExists(atPath: game.romPath) else {

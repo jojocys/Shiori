@@ -53,8 +53,8 @@ def sha(path):
 
 def source_digest():
     paths = [ROOT / "Package.swift", ROOT / "Package.resolved", ROOT / "version.json"]
-    for directory in ("Sources", "scripts", "config", "Resources"):
-        paths += [p for p in (ROOT / directory).rglob("*") if p.is_file() and p.suffix in (".swift", ".sh", ".py", ".json", ".txt", ".strings")]
+    for directory in ("Sources", "Native", "scripts", "config", "Resources"):
+        paths += [p for p in (ROOT / directory).rglob("*") if p.is_file() and p.suffix in (".swift", ".m", ".c", ".sh", ".py", ".json", ".txt", ".strings")]
     paths += [p for p in (ROOT / "assets").glob("*") if p.suffix.lower() in (".png", ".svg", ".jpg", ".jpeg")]
     version = json.loads((ROOT / "version.json").read_text())["version"]
     notes = REPO_ROOT / f"Shiori-{version}-变更说明.md"

@@ -1,6 +1,6 @@
 {
-  "build": 6,
-  "version": "0.2.3",
-  "notes": "改进更新提醒与 Wine Steam 窗口唤起，并修复完整下载后仍显示预填充状态的问题。",
+  "build": 10,
+  "version": "0.2.4",
+  "notes": "加强 Steam 文件与 Switch 导入保护，修复多库启动和更新状态问题，改进后台扫描与操作互斥，优化了部分 UI。",
   "url": "https://github.com/jojocys/Shiori/releases/latest"
 }

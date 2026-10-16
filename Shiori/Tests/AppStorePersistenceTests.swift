@@ -3,6 +3,69 @@ import XCTest
 
 @MainActor
 final class AppStorePersistenceTests: XCTestCase {
+    func testReloadPreservesManuallySelectedROMAndScriptWhenLegacyMetadataNeedsRepair() throws {
+        let root = temporaryStoreDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let roms = root.appendingPathComponent("roms", isDirectory: true)
+        try FileManager.default.createDirectory(at: roms, withIntermediateDirectories: true)
+        let a = roms.appendingPathComponent("GameA.nsp")
+        let b = roms.appendingPathComponent("GameB.nsp")
+        try Data().write(to: a)
+        try Data().write(to: b)
+        let first = try XCTUnwrap(GameScanner.scanGameFolder(roms).romURL)
+        let manual = first.path == a.path ? b : a
+        let store = AppStore(appDataDirectory: root.appendingPathComponent("data"), initializeRuntime: false)
+        let game = GameEntry(name: "Manual choice", gameFolderPath: roms.path, engineHint: "legacy",
+                             platform: .switchEmu, romPath: manual.path,
+                             emulatorAppPath: "/explicit/emulator.app", launchScriptPath: "/explicit/launch.sh")
+        store.games = [game]
+        store.selectedGameID = game.id
+        store.save()
+        let reloaded = AppStore(appDataDirectory: store.appDataDir, initializeRuntime: false)
+        XCTAssertEqual(reloaded.selectedGame?.romPath, manual.path)
+        XCTAssertEqual(reloaded.selectedGame?.launchScriptPath, game.launchScriptPath)
+        XCTAssertEqual(reloaded.selectedGame?.emulatorAppPath, game.emulatorAppPath)
+        let again = AppStore(appDataDirectory: store.appDataDir, initializeRuntime: false)
+        XCTAssertEqual(again.selectedGame?.romPath, manual.path)
+    }
+
+    func testNameDraftCommitsToOriginalGameAfterSelectionChanges() throws {
+        let root = temporaryStoreDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = AppStore(appDataDirectory: root, initializeRuntime: false)
+        let original = GameEntry(name: "Original")
+        let other = GameEntry(name: "Other")
+        store.games = [original, other]
+        store.selectedGameID = original.id
+        var draft = GameNameDraft(game: original)
+        draft.text = ""
+        for character in "My Game" { draft.text.append(character) }
+        let change = try XCTUnwrap(draft.pendingChange)
+        store.selectedGameID = other.id
+        store.renameGame(change.gameID, to: change.name)
+        XCTAssertEqual(store.games.first(where: { $0.id == original.id })?.name, "My Game")
+        XCTAssertEqual(store.selectedGame?.name, "Other")
+        let reloaded = AppStore(appDataDirectory: root, initializeRuntime: false)
+        XCTAssertEqual(reloaded.games.first(where: { $0.id == original.id })?.name, "My Game")
+    }
+
+    func testUpdateGateBlocksBothFontRepairAndRestoreBeforeAnyRuntimeLaunch() throws {
+        let root = temporaryStoreDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let gate = UpdateInstallationGate()
+        gate.arm()
+        let store = AppStore(appDataDirectory: root, initializeRuntime: false, updateInstallationGate: gate)
+        let game = GameEntry(name: "Protected", prefixDir: root.appendingPathComponent("prefix").path)
+        store.games = [game]
+        store.selectedGameID = game.id
+        store.repairSelectedGameFonts()
+        XCTAssertTrue(store.statusMessage.contains("更新已准备安装"))
+        store.restoreSelectedGameFonts()
+        XCTAssertTrue(store.statusMessage.contains("更新已准备安装"))
+        XCTAssertFalse(store.isManagingFontCompatibility)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: game.prefixDir))
+    }
+
     func testFreshAndExplicitlyEmptyStoresStayEmpty() throws {
         let root = temporaryStoreDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

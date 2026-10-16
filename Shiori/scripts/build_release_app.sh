@@ -23,6 +23,7 @@ EMBEDDED_WINE_DIR="$RESOURCES_DIR/EmbeddedWine"
 INSTALLERS_DIR="$RESOURCES_DIR/Installers"
 EMBEDDED_EMULATOR_DIR="$RESOURCES_DIR/EmbeddedEmulator"
 EMULATOR_SOURCE_APP="${EMBED_EMULATOR_APP_PATH:-}"
+EMBED_SWITCH_EMULATOR="${EMBED_SWITCH_EMULATOR:-1}"
 EXECUTABLE_NAME="$APP_NAME"
 PACKAGE_BIN="$ROOT_DIR/.build/release/Shiori"
 ICON_SOURCE="$ROOT_DIR/assets/Shiori.icns"
@@ -31,6 +32,36 @@ WINE_SOURCE_APP="${EMBED_WINE_APP_PATH:-}"
 XQUARTZ_SOURCE_PKG="${EMBED_XQUARTZ_PKG_PATH:-}"
 
 mkdir -p "$DIST_DIR"
+
+if [[ "$EMBED_SWITCH_EMULATOR" == "1" ]]; then
+  if [[ -z "$EMULATOR_SOURCE_APP" ]]; then
+    for candidate in \
+      "/Applications/Shiori.app/Contents/Resources/EmbeddedEmulator/Ryujinx.app" \
+      "$HOME/Applications/Shiori.app/Contents/Resources/EmbeddedEmulator/Ryujinx.app" \
+      "/Applications/Ryujinx.app" \
+      "$HOME/Applications/Ryujinx.app"
+    do
+      if [[ -d "$candidate" ]]; then
+        EMULATOR_SOURCE_APP="$candidate"
+        break
+      fi
+    done
+  fi
+  if [[ -z "$EMULATOR_SOURCE_APP" || ! -d "$EMULATOR_SOURCE_APP" ]]; then
+    echo "Switch emulator required: set EMBED_EMULATOR_APP_PATH, or explicitly use EMBED_SWITCH_EMULATOR=0 for a build without it." >&2
+    exit 1
+  fi
+  EMULATOR_EXECUTABLE="$(/usr/bin/plutil -extract CFBundleExecutable raw "$EMULATOR_SOURCE_APP/Contents/Info.plist")"
+  if [[ ! -x "$EMULATOR_SOURCE_APP/Contents/MacOS/$EMULATOR_EXECUTABLE" ]]; then
+    echo "Switch emulator executable missing: $EMULATOR_SOURCE_APP" >&2
+    exit 1
+  fi
+elif [[ "$EMBED_SWITCH_EMULATOR" == "0" ]]; then
+  EMULATOR_SOURCE_APP=""
+else
+  echo "EMBED_SWITCH_EMULATOR must be 0 or 1." >&2
+  exit 1
+fi
 
 if [[ -z "$APP_VERSION" || -z "$BUILD_NUMBER" || -z "$SPARKLE_PUBLIC_KEY" ]]; then
   echo "Version, build number, and Sparkle public key must not be empty." >&2
@@ -123,6 +154,7 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/$EXECU
 echo "[4/7] Embedding Wine runtime..."
 WINE_APP_NAME="$(basename "$WINE_SOURCE_APP")"
 ditto "$WINE_SOURCE_APP" "$EMBEDDED_WINE_DIR/$WINE_APP_NAME"
+"$ROOT_DIR/scripts/build_wine_dock_adapter.sh" "$RESOURCES_DIR/libShioriWineDock.dylib"
 if command -v xattr >/dev/null 2>&1; then
   xattr -dr com.apple.quarantine "$EMBEDDED_WINE_DIR/$WINE_APP_NAME" >/dev/null 2>&1 || true
 fi
@@ -133,18 +165,19 @@ if command -v xattr >/dev/null 2>&1; then
   xattr -dr com.apple.quarantine "$INSTALLERS_DIR/XQuartz.pkg" >/dev/null 2>&1 || true
 fi
 
-# 可选：内置 Switch 模拟器（由 EMBED_EMULATOR_APP_PATH 提供）。
+# 默认内置 Switch 模拟器；不含模拟器的构建必须显式选择 EMBED_SWITCH_EMULATOR=0。
 # 注意：仅内置模拟器本体；绝不打包 prod.keys / 固件 / ROM（版权文件，由用户自备）。
 if [[ -n "$EMULATOR_SOURCE_APP" && -d "$EMULATOR_SOURCE_APP" ]]; then
   echo "[5.5/7] Embedding Switch emulator..."
   mkdir -p "$EMBEDDED_EMULATOR_DIR"
   EMULATOR_APP_NAME="$(basename "$EMULATOR_SOURCE_APP")"
   ditto "$EMULATOR_SOURCE_APP" "$EMBEDDED_EMULATOR_DIR/$EMULATOR_APP_NAME"
+  "$ROOT_DIR/scripts/prepare_switch_runtime.sh" "$EMBEDDED_EMULATOR_DIR/$EMULATOR_APP_NAME" "$ICON_SOURCE"
   if command -v xattr >/dev/null 2>&1; then
     xattr -dr com.apple.quarantine "$EMBEDDED_EMULATOR_DIR/$EMULATOR_APP_NAME" >/dev/null 2>&1 || true
   fi
 else
-  echo "[5.5/7] EMBED_EMULATOR_APP_PATH 未设置，跳过内置模拟器。"
+  echo "[5.5/7] EMBED_SWITCH_EMULATOR=0，跳过内置模拟器。"
 fi
 
 cat > "$CONTENTS_DIR/Info.plist" <<PLIST

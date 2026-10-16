@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-enum SteamLibrarySource: String, Hashable {
+enum SteamLibrarySource: String, Hashable, Sendable {
     case mac
     case wine
 
@@ -13,7 +13,7 @@ enum SteamLibrarySource: String, Hashable {
     }
 }
 
-struct SteamLibraryGame: Identifiable, Hashable {
+struct SteamLibraryGame: Identifiable, Hashable, Sendable {
     var id: String
     var appID: String
     var name: String
@@ -29,6 +29,14 @@ struct SteamLibraryGame: Identifiable, Hashable {
     var hasManifest: Bool
     var isPreloadOnly: Bool
 
+    var installationIdentity: String {
+        Self.installationIdentity(appID: appID, steamappsPath: steamappsPath)
+    }
+
+    static func installationIdentity(appID: String, steamappsPath: String) -> String {
+        "\(appID):\(SteamLibraryPathSafety.canonical(URL(fileURLWithPath: steamappsPath)).path)"
+    }
+
     var sizeLabel: String {
         guard sizeOnDisk > 0 else { return "未知大小" }
         return ByteCountFormatter.string(fromByteCount: sizeOnDisk, countStyle: .file)
@@ -40,7 +48,7 @@ struct SteamLibraryGame: Identifiable, Hashable {
     }
 }
 
-struct SteamPrefillReport: Hashable {
+struct SteamPrefillReport: Hashable, Sendable {
     var targetPath: String
     var copiedFiles: Int
     var skippedFiles: Int
@@ -51,7 +59,7 @@ struct SteamPrefillReport: Hashable {
     }
 }
 
-struct SteamPrefillMetadata: Codable, Hashable {
+struct SteamPrefillMetadata: Codable, Hashable, Sendable {
     var appID: String
     var name: String
     var installDir: String
@@ -68,7 +76,7 @@ struct SteamPrefillMetadata: Codable, Hashable {
     }
 }
 
-struct SteamInstallStatus: Hashable {
+struct SteamInstallStatus: Hashable, Sendable {
     var appID: String
     var name: String
     var installDir: String
@@ -88,6 +96,10 @@ struct SteamInstallStatus: Hashable {
     var hasDownloadingDir: Bool
     var hasTempDir: Bool
     var prefillMetadata: SteamPrefillMetadata?
+
+    var installationIdentity: String {
+        SteamLibraryGame.installationIdentity(appID: appID, steamappsPath: steamappsPath)
+    }
 
     /// 仅在还在下载 / 写入时返回进度；已安装或下载与写入都完成 → nil（不显示进度条）。
     var progressFraction: Double? {
@@ -239,6 +251,31 @@ enum SteamLibraryManager {
     /// Steam-managed components that have app manifests but are not user-launchable games.
     private static let nonGameAppIDs: Set<String> = ["228980"]
 
+    /// Mutation callers must authorize libraries independently of the game record.
+    /// Explicit roots support selected/custom prefixes and isolated test fixtures.
+    private static func mutationSafety(
+        steamappsURL: URL,
+        protectedRoots: [URL]?,
+        allowedRoots: [URL]?,
+        fileManager fm: FileManager
+    ) throws -> SteamLibraryPathSafety {
+        let home = fm.homeDirectoryForCurrentUser
+        let protected = protectedRoots ?? macSteamappsURLs(home: home, fileManager: fm)
+        let allowed: [URL]
+        if let allowedRoots {
+            allowed = allowedRoots
+        } else {
+            let prefixes = [".shiori", ".vnlauncher", ".vnlauncher-zero"].map {
+                home.appendingPathComponent($0).appendingPathComponent("steam-prefix")
+            }
+            allowed = prefixes.flatMap { prefix -> [URL] in
+                let root = prefix.appendingPathComponent("drive_c/Program Files (x86)/Steam/steamapps")
+                return [root] + steamappsURLsFromLibraryFolders(steamappsURL: root, winePrefixURL: prefix, fileManager: fm)
+            }
+        }
+        return try SteamLibraryPathSafety(steamappsURL: steamappsURL, protectedRoots: protected, allowedRoots: allowed)
+    }
+
     static func macSteamappsURLs(home: URL, fileManager fm: FileManager = .default) -> [URL] {
         let defaultRoot = home
             .appendingPathComponent("Library", isDirectory: true)
@@ -303,18 +340,18 @@ enum SteamLibraryManager {
                 ), !nonGameAppIDs.contains(status.appID) else {
                     continue
                 }
-                statuses[status.appID] = status
+                statuses[status.installationIdentity] = status
             }
 
             for metadata in prefillByAppID.values
-            where statuses[metadata.appID] == nil && !nonGameAppIDs.contains(metadata.appID) {
+            where statuses[SteamLibraryGame.installationIdentity(appID: metadata.appID, steamappsPath: steamappsURL.path)] == nil && !nonGameAppIDs.contains(metadata.appID) {
                 let downloadingURL = steamappsURL
                     .appendingPathComponent("downloading", isDirectory: true)
                     .appendingPathComponent(metadata.appID, isDirectory: true)
                 let tempURL = steamappsURL
                     .appendingPathComponent("temp", isDirectory: true)
                     .appendingPathComponent(metadata.appID, isDirectory: true)
-                statuses[metadata.appID] = SteamInstallStatus(
+                statuses[SteamLibraryGame.installationIdentity(appID: metadata.appID, steamappsPath: steamappsURL.path)] = SteamInstallStatus(
                     appID: metadata.appID,
                     name: metadata.name,
                     installDir: metadata.installDir,
@@ -342,10 +379,10 @@ enum SteamLibraryManager {
     }
 
     static func excludingSteamappsURLs(_ urls: [URL], under excludedRoots: [URL]) -> [URL] {
-        let excludedPaths = excludedRoots.map { $0.standardizedFileURL.path }
+        let excludedPaths = excludedRoots.map { SteamLibraryPathSafety.canonical($0).path }
         var seen = Set<String>()
         return urls.compactMap { url in
-            let path = url.standardizedFileURL.path
+            let path = SteamLibraryPathSafety.canonical(url).path
             guard !excludedPaths.contains(where: { excluded in
                 let prefix = excluded.hasSuffix("/") ? excluded : excluded + "/"
                 return path == excluded || path.hasPrefix(prefix)
@@ -353,7 +390,7 @@ enum SteamLibraryManager {
                 return nil
             }
             guard seen.insert(path).inserted else { return nil }
-            return url
+            return SteamLibraryPathSafety.canonical(url)
         }
     }
 
@@ -440,10 +477,31 @@ enum SteamLibraryManager {
             .appendingPathComponent("steamapps", isDirectory: true)
     }
 
-    static func prefillWineSteam(from sourceGame: SteamLibraryGame, to wineSteamappsURL: URL, fileManager fm: FileManager = .default) throws -> SteamPrefillReport {
+    static func prefillWineSteam(from sourceGame: SteamLibraryGame, to requestedSteamappsURL: URL,
+                                 protectedRoots: [URL]? = nil, allowedRoots: [URL]? = nil,
+                                 fileManager fm: FileManager = .default) throws -> SteamPrefillReport {
+        let safety = try mutationSafety(steamappsURL: requestedSteamappsURL,
+            protectedRoots: protectedRoots, allowedRoots: allowedRoots, fileManager: fm)
+        let wineSteamappsURL = safety.steamappsURL
+        try safety.validateComponent(sourceGame.appID, label: "AppID", allowEmpty: true, numeric: true)
+        try safety.validateComponent(sourceGame.installDir, label: "安装目录")
         let sourceURL = URL(fileURLWithPath: sourceGame.installPath, isDirectory: true)
+        let commonURL = wineSteamappsURL.appendingPathComponent("common", isDirectory: true)
+        let targetURL = commonURL.appendingPathComponent(sourceGame.installDir, isDirectory: true)
+        let resolvedSource = SteamLibraryPathSafety.canonical(sourceURL)
+        guard !SteamLibraryPathSafety.contains(resolvedSource, in: targetURL),
+              !SteamLibraryPathSafety.contains(targetURL, in: resolvedSource) else {
+            throw SteamLibraryPathSafety.error("源目录与目标目录重叠，已拒绝预填充。")
+        }
+        try safety.validate(targetURL)
+        try safety.validate(prefillMetadataDirectory(in: wineSteamappsURL))
         if !sourceGame.appID.isEmpty {
             let manifestURL = wineSteamappsURL.appendingPathComponent("appmanifest_\(sourceGame.appID).acf")
+            try safety.validate(manifestURL)
+            try safety.validate(prefillMetadataURL(for: sourceGame.appID, in: wineSteamappsURL))
+            try safety.validate(wineSteamappsURL.appendingPathComponent("downloading"))
+            let cleanup = steamDownloadStateTargets(appID: sourceGame.appID, steamappsURL: wineSteamappsURL, fileManager: fm)
+            for target in cleanup { try safety.validate(target) }
             if fm.fileExists(atPath: manifestURL.path) {
                 throw NSError(
                     domain: "ShioriSteamPrefill",
@@ -451,11 +509,10 @@ enum SteamLibraryManager {
                     userInfo: [NSLocalizedDescriptionKey: "Wine Steam 已存在该 AppID 的安装清单。请先在 Shiori 的 Wine Steam 游戏列表中删除旧安装/下载任务，再重新预填充。"]
                 )
             }
-            try removeSteamDownloadState(appID: sourceGame.appID, steamappsURL: wineSteamappsURL, fileManager: fm)
+            // Every write/remove path is checked before touching download state.
+            for target in cleanup where fm.fileExists(atPath: target.path) { try fm.removeItem(at: target) }
         }
 
-        let commonURL = wineSteamappsURL.appendingPathComponent("common", isDirectory: true)
-        let targetURL = commonURL.appendingPathComponent(sourceGame.installDir, isDirectory: true)
         try preparePrefillTarget(sourceGame: sourceGame, targetURL: targetURL, steamappsURL: wineSteamappsURL, fileManager: fm)
         try fm.createDirectory(at: targetURL, withIntermediateDirectories: true)
 
@@ -521,33 +578,66 @@ enum SteamLibraryManager {
         try fm.removeItem(at: targetURL)
     }
 
-    static func deleteWineGame(_ game: SteamLibraryGame, fileManager fm: FileManager = .default) throws {
-        let manifestText = game.manifestPath.isEmpty ? nil : try? String(contentsOfFile: game.manifestPath, encoding: .utf8)
-        if !game.manifestPath.isEmpty, fm.fileExists(atPath: game.manifestPath) {
-            try fm.removeItem(atPath: game.manifestPath)
+    static func deleteWineGame(_ game: SteamLibraryGame,
+                               protectedRoots: [URL]? = nil, allowedRoots: [URL]? = nil,
+                               fileManager fm: FileManager = .default) throws {
+        guard game.source == .wine, !game.steamappsPath.isEmpty else {
+            throw SteamLibraryPathSafety.error("只允许删除获准 Wine Steam 库中的游戏。")
         }
-        if !game.installPath.isEmpty, fm.fileExists(atPath: game.installPath) {
-            try fm.removeItem(atPath: game.installPath)
+        let safety = try mutationSafety(steamappsURL: URL(fileURLWithPath: game.steamappsPath),
+            protectedRoots: protectedRoots, allowedRoots: allowedRoots, fileManager: fm)
+        let steamappsURL = safety.steamappsURL
+        try safety.validateComponent(game.appID, label: "AppID", allowEmpty: true, numeric: true)
+        try safety.validateComponent(game.installDir, label: "安装目录")
+        var targets: [URL] = []
+        if !game.installPath.isEmpty {
+            let install = steamappsURL.appendingPathComponent("common").appendingPathComponent(game.installDir)
+            try safety.validateRecordedPath(game.installPath, expected: install)
+            targets.append(install)
         }
-        if !game.appID.isEmpty {
-            let steamappsURL = URL(fileURLWithPath: game.steamappsPath, isDirectory: true)
-            let cleanupTargets = [
-                steamappsURL.appendingPathComponent("downloading", isDirectory: true).appendingPathComponent(game.appID, isDirectory: true),
-                steamappsURL.appendingPathComponent("temp", isDirectory: true).appendingPathComponent(game.appID, isDirectory: true),
-                steamappsURL.appendingPathComponent("shadercache", isDirectory: true).appendingPathComponent(game.appID, isDirectory: true),
-                steamappsURL.appendingPathComponent("compatdata", isDirectory: true).appendingPathComponent(game.appID, isDirectory: true),
-                steamappsURL
-                    .appendingPathComponent("workshop", isDirectory: true)
-                    .appendingPathComponent("content", isDirectory: true)
-                    .appendingPathComponent(game.appID, isDirectory: true)
-            ]
-            for target in cleanupTargets where fm.fileExists(atPath: target.path) {
-                try fm.removeItem(at: target)
+        var manifestText: String?
+        if !game.manifestPath.isEmpty {
+            guard !game.appID.isEmpty else {
+                throw SteamLibraryPathSafety.error("清单记录缺少 AppID，已拒绝删除。")
             }
-            try removeSteamDownloadStatePatchFiles(appID: game.appID, steamappsURL: steamappsURL, fileManager: fm)
-            try removeDepotManifestFiles(appID: game.appID, manifestText: manifestText, steamappsURL: steamappsURL, fileManager: fm)
+            let manifest = steamappsURL.appendingPathComponent("appmanifest_\(game.appID).acf")
+            try safety.validateRecordedPath(game.manifestPath, expected: manifest)
+            targets.append(manifest)
+            manifestText = try? String(contentsOf: manifest, encoding: .utf8)
         }
-        try removePrefillMetadata(for: game, fileManager: fm)
+        // Validate discovery directories before reading through them, then build
+        // the entire removal plan. A bad cache link cannot cause a partial delete.
+        let metadataDirectory = prefillMetadataDirectory(in: steamappsURL)
+        try safety.validate(metadataDirectory)
+        var canonicalGame = game
+        canonicalGame.steamappsPath = steamappsURL.path
+        targets.append(contentsOf: prefillMetadataDeletionTargets(for: canonicalGame, fileManager: fm))
+        if !game.appID.isEmpty {
+            try safety.validate(steamappsURL.appendingPathComponent("downloading"))
+            targets.append(contentsOf: steamDownloadStateTargets(appID: game.appID, steamappsURL: steamappsURL, fileManager: fm))
+            for directory in ["shadercache", "compatdata", "workshop/content"] {
+                targets.append(steamappsURL.appendingPathComponent(directory).appendingPathComponent(game.appID))
+            }
+            let depotCaches = [steamappsURL.appendingPathComponent("depotcache"),
+                               steamappsURL.deletingLastPathComponent().appendingPathComponent("depotcache")]
+            for cache in depotCaches {
+                try safety.validate(cache, siblingDepotCache: !SteamLibraryPathSafety.contains(cache, in: steamappsURL))
+            }
+            let depotTargets = depotManifestFiles(appID: game.appID, manifestText: manifestText,
+                steamappsURL: steamappsURL, fileManager: fm)
+            for target in depotTargets {
+                try safety.validate(target, siblingDepotCache: !SteamLibraryPathSafety.contains(SteamLibraryPathSafety.canonical(target), in: steamappsURL))
+            }
+            // Depot targets have their own narrowly derived sibling boundary.
+            for target in targets { try safety.validate(target) }
+            targets.append(contentsOf: depotTargets)
+        } else {
+            for target in targets { try safety.validate(target) }
+        }
+        var seen = Set<String>()
+        for target in targets where seen.insert(target.path).inserted && fm.fileExists(atPath: target.path) {
+            try fm.removeItem(at: target)
+        }
     }
 
     private static func parseInstallStatus(
@@ -593,34 +683,18 @@ enum SteamLibraryManager {
         )
     }
 
-    private static func removeSteamDownloadState(appID: String, steamappsURL: URL, fileManager fm: FileManager) throws {
-        guard !appID.isEmpty else { return }
-        let cleanupTargets = [
-            steamappsURL.appendingPathComponent("downloading", isDirectory: true).appendingPathComponent(appID, isDirectory: true),
-            steamappsURL.appendingPathComponent("temp", isDirectory: true).appendingPathComponent(appID, isDirectory: true)
-        ]
-        for target in cleanupTargets where fm.fileExists(atPath: target.path) {
-            try fm.removeItem(at: target)
-        }
-        try removeSteamDownloadStatePatchFiles(appID: appID, steamappsURL: steamappsURL, fileManager: fm)
-    }
-
-    private static func removeSteamDownloadStatePatchFiles(appID: String, steamappsURL: URL, fileManager fm: FileManager) throws {
-        guard !appID.isEmpty else { return }
+    private static func steamDownloadStateTargets(appID: String, steamappsURL: URL, fileManager fm: FileManager) -> [URL] {
+        guard !appID.isEmpty else { return [] }
         let downloadingURL = steamappsURL.appendingPathComponent("downloading", isDirectory: true)
-        let patchURLs = (try? fm.contentsOfDirectory(
-            at: downloadingURL,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ))?.filter {
-            $0.lastPathComponent.hasPrefix("state_\(appID)_") && $0.pathExtension.lowercased() == "patch"
-        } ?? []
-        for url in patchURLs {
-            try fm.removeItem(at: url)
-        }
+        let patchURLs = (try? fm.contentsOfDirectory(at: downloadingURL, includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]))?.filter {
+                $0.lastPathComponent.hasPrefix("state_\(appID)_") && $0.pathExtension.lowercased() == "patch"
+            } ?? []
+        return [downloadingURL.appendingPathComponent(appID, isDirectory: true),
+                steamappsURL.appendingPathComponent("temp", isDirectory: true).appendingPathComponent(appID, isDirectory: true)] + patchURLs
     }
 
-    private static func removeDepotManifestFiles(appID: String, manifestText: String?, steamappsURL: URL, fileManager fm: FileManager) throws {
+    private static func depotManifestFiles(appID: String, manifestText: String?, steamappsURL: URL, fileManager fm: FileManager) -> [URL] {
         var depotIDs = Set<String>()
         depotIDs.insert(appID)
         if let manifestText {
@@ -632,6 +706,7 @@ enum SteamLibraryManager {
             steamappsURL.deletingLastPathComponent().appendingPathComponent("depotcache", isDirectory: true)
         ], fileManager: fm)
 
+        var targets: [URL] = []
         for depotcacheURL in depotcacheURLs {
             let manifestURLs = (try? fm.contentsOfDirectory(
                 at: depotcacheURL,
@@ -644,10 +719,9 @@ enum SteamLibraryManager {
                 }
             } ?? []
 
-            for url in manifestURLs {
-                try fm.removeItem(at: url)
-            }
+            targets.append(contentsOf: manifestURLs)
         }
+        return targets
     }
 
     private static func installedDepotIDs(in manifestText: String) -> Set<String> {
@@ -787,24 +861,16 @@ enum SteamLibraryManager {
         Dictionary(uniqueKeysWithValues: prefillMetadata(in: steamappsURL, fileManager: fm).map { ($0.installDir, $0) })
     }
 
-    private static func removePrefillMetadata(for game: SteamLibraryGame, fileManager fm: FileManager) throws {
-        guard !game.steamappsPath.isEmpty else { return }
-        let steamappsURL = URL(fileURLWithPath: game.steamappsPath, isDirectory: true)
-        let directory = prefillMetadataDirectory(in: steamappsURL)
-        let urls = (try? fm.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ))?.filter { $0.pathExtension.lowercased() == "json" } ?? []
+    private static func prefillMetadataDeletionTargets(for game: SteamLibraryGame, fileManager fm: FileManager) -> [URL] {
+        guard !game.steamappsPath.isEmpty else { return [] }
+        let directory = prefillMetadataDirectory(in: URL(fileURLWithPath: game.steamappsPath))
+        let urls = (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]))?.filter { $0.pathExtension.lowercased() == "json" } ?? []
         let decoder = JSONDecoder()
-        for url in urls {
+        return urls.filter { url in
             guard let data = try? Data(contentsOf: url),
-                  let metadata = try? decoder.decode(SteamPrefillMetadata.self, from: data) else {
-                continue
-            }
-            if (!game.appID.isEmpty && metadata.appID == game.appID) || metadata.installDir == game.installDir {
-                try fm.removeItem(at: url)
-            }
+                  let metadata = try? decoder.decode(SteamPrefillMetadata.self, from: data) else { return false }
+            return (!game.appID.isEmpty && metadata.appID == game.appID) || metadata.installDir == game.installDir
         }
     }
 
@@ -911,7 +977,7 @@ enum SteamLibraryManager {
         var seen = Set<String>()
         var result: [URL] = []
         for url in urls {
-            let standardized = url.standardizedFileURL
+            let standardized = SteamLibraryPathSafety.canonical(url)
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: standardized.path, isDirectory: &isDir), isDir.boolValue else {
                 continue

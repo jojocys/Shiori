@@ -23,7 +23,8 @@ let package = Package(
         .testTarget(
             name: "ShioriTests",
             dependencies: ["Shiori"],
-            path: "Tests"
+            path: "Tests",
+            exclude: ["Native"]
         )
     ]
 )

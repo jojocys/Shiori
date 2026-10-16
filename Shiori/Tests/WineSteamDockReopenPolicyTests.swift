@@ -25,8 +25,15 @@ final class WineSteamDockReopenPolicyTests: XCTestCase {
         ))
     }
 
-    func testDoesNotRequestReopenWhenAnySteamClientWindowIsVisible() {
+    func testDoesNotRequestReopenWhenActivatedClientOwnsVisibleWindow() {
         XCTAssertFalse(shouldRequestReopen(
+            activatedPID: mainPID,
+            visibleWindowOwnerPIDs: [mainPID]
+        ))
+    }
+
+    func testBackendDockEntryRequestsFrontendEvenWhenHelperWindowIsVisible() {
+        XCTAssertTrue(shouldRequestReopen(
             activatedPID: mainPID,
             visibleWindowOwnerPIDs: [helperPID]
         ))

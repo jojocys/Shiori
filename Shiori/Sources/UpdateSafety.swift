@@ -139,6 +139,29 @@ final class UpdateInstallationGate: ObservableObject {
 
 @MainActor
 final class ShioriApplicationDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        !SwitchDockIntegration.showGameWindow()
+    }
+
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        guard SwitchDockIntegration.runningApplication != nil else { return nil }
+        let menu = NSMenu()
+        let game = NSMenuItem(title: "返回 Switch 游戏", action: #selector(showSwitchGame), keyEquivalent: "")
+        game.target = self
+        menu.addItem(game)
+        let library = NSMenuItem(title: "显示 Shiori 游戏库", action: #selector(showGameLibrary), keyEquivalent: "")
+        library.target = self
+        menu.addItem(library)
+        return menu
+    }
+
+    @objc private func showSwitchGame() { SwitchDockIntegration.showGameWindow() }
+
+    @objc private func showGameLibrary() {
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.windows.first(where: { $0.canBecomeMain })?.makeKeyAndOrderFront(nil)
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let gate = UpdateInstallationGate.shared
         guard gate.installationPending else { return .terminateNow }

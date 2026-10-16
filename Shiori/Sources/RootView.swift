@@ -258,17 +258,15 @@ private struct UpdateToolbarLabel: View {
 
 private struct UpdateSpinner: View {
     let color: Color
-    @State private var spinning = false
 
     var body: some View {
-        Circle()
-            .trim(from: 0.18, to: 0.88)
-            .stroke(color, style: StrokeStyle(lineWidth: 2.4, lineCap: .round))
+        // Native progress owns its animation lifecycle. A repeatForever
+        // rotation can survive toolbar hosting when this slot becomes an icon.
+        ProgressView()
+            .progressViewStyle(.circular)
+            .controlSize(.small)
+            .tint(color)
             .frame(width: 14, height: 14)
-            .rotationEffect(.degrees(spinning ? 360 : 0))
-            .onAppear {
-                withAnimation(.linear(duration: 0.8).repeatForever(autoreverses: false)) { spinning = true }
-            }
     }
 }
 
@@ -306,6 +304,8 @@ struct RootView: View {
     @State private var pendingMacSteamReimport: SteamLibraryGame?
     @State private var coverPreviewGame: GameEntry?
     @State private var sidebarWidth: CGFloat = 264
+    @State private var nameDraft = GameNameDraft()
+    @FocusState private var isNameFieldFocused: Bool
     private let steamRefreshTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
     private var appearance: AppearancePreference {
@@ -365,6 +365,7 @@ struct RootView: View {
                     store.deleteWineSteamGame(game)
                     pendingWineSteamDelete = nil
                 }
+                .disabled(store.isSteamLibraryBusy)
             }
             Button("取消", role: .cancel) { pendingWineSteamDelete = nil }
         } message: {
@@ -378,6 +379,7 @@ struct RootView: View {
                     store.resetWineSteamGameAndPrefill(game)
                     pendingMacSteamReimport = nil
                 }
+                .disabled(store.isSteamLibraryBusy)
             }
             Button("取消", role: .cancel) { pendingMacSteamReimport = nil }
         } message: {
@@ -395,6 +397,8 @@ struct RootView: View {
             }
         }
         .onChange(of: store.selectedGameID) { newID in
+            commitNameDraft()
+            nameDraft.synchronize(with: store.selectedGame)
             // 列表变化（如删除）后保持侧栏与 store 同步，但不打断 Steam 视图。
             if case .game = sidebarSelection {
                 sidebarSelection = newID.map(SidebarItem.game)
@@ -402,10 +406,18 @@ struct RootView: View {
                 sidebarSelection = newID.map(SidebarItem.game)
             }
         }
+        .onChange(of: store.selectedGame?.name) { _ in
+            if !isNameFieldFocused && nameDraft.pendingChange == nil {
+                nameDraft.synchronize(with: store.selectedGame)
+            }
+        }
         .onReceive(steamRefreshTimer) { _ in
             if sidebarSelection == .home || sidebarSelection == .steam {
                 store.refreshSteamLibraries()
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            commitNameDraft()
         }
     }
 
@@ -595,6 +607,7 @@ struct RootView: View {
 
     /// 顶部与侧栏的全局刷新必须覆盖主页中展示的全部数据，包括 Wine Steam 新安装游戏。
     private func refreshAllUserData() {
+        commitNameDraft()
         store.load()
         store.refreshRuntimeStatus()
         store.refreshSteamLibraries(userInitiated: true)
@@ -755,6 +768,7 @@ struct RootView: View {
             .buttonStyle(.borderedProminent)
             .tint(.green)
             .controlSize(.large)
+            .disabled(store.isSteamLibraryBusy)
         }
         .frame(minHeight: 58)
     }
@@ -810,7 +824,7 @@ struct RootView: View {
             .buttonStyle(.borderedProminent)
             .tint(configured ? .green : .secondary)
             .controlSize(.small)
-            .disabled(!configured)
+            .disabled(!configured || store.isSteamLibraryBusy)
             .help(configured ? "直接启动该游戏" : "点击卡片进入配置页并完成设置")
             .padding(14)
         }
@@ -859,7 +873,7 @@ struct RootView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(readyToLaunch ? .green : .orange)
                 .controlSize(.small)
-                .disabled(isLaunching)
+                .disabled(isLaunching || store.isSteamLibraryBusy)
                 .help(readyToLaunch ? "通过 Wine Steam 启动该游戏" : "打开 Wine Steam 安装/验证，只复用校验通过的文件")
             }
             .padding(14)
@@ -976,7 +990,7 @@ struct RootView: View {
                 .tint(.green)
                 .controlSize(.large)
                 .keyboardShortcut(.return, modifiers: [.command])
-                .disabled(game == nil)
+                .disabled(game == nil || store.isSteamLibraryBusy)
 
                 HStack(spacing: 8) {
                     Button {
@@ -1060,6 +1074,13 @@ struct RootView: View {
                     labeledField("配置名称") {
                         TextField("例如：Senren Banka", text: nameBinding)
                             .textFieldStyle(.roundedBorder)
+                            .focused($isNameFieldFocused)
+                            .onSubmit { commitNameDraft() }
+                            .onChange(of: isNameFieldFocused) { focused in
+                                if !focused { commitNameDraft() }
+                            }
+                            .onAppear { synchronizeNameDraft() }
+                            .onDisappear { commitNameDraft() }
                     }
 
                     labeledField("当前目录") {
@@ -1186,6 +1207,7 @@ struct RootView: View {
                     }
 
                     Button {
+                        commitNameDraft()
                         store.saveCurrentFromP1()
                     } label: {
                         Label("保存到游戏列表", systemImage: "square.and.arrow.down")
@@ -1376,7 +1398,7 @@ struct RootView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(.blue)
-                        .disabled(store.isManagingFontCompatibility)
+                        .disabled(store.isManagingFontCompatibility || store.isSteamLibraryBusy)
 
                         Button(role: .destructive) {
                             store.restoreSelectedGameFonts()
@@ -1384,7 +1406,7 @@ struct RootView: View {
                             Label("撤销字体修复", systemImage: "arrow.uturn.backward")
                         }
                         .buttonStyle(.bordered)
-                        .disabled(store.isManagingFontCompatibility || !store.selectedGameHasFontCompatibilityRepair)
+                        .disabled(store.isManagingFontCompatibility || store.isSteamLibraryBusy || !store.selectedGameHasFontCompatibilityRepair)
                     }
 
                     Text("Shiori 使用当前实际 Wine 写入字体别名，不下载或分发 Microsoft 字体；已有自定义映射不会被覆盖。修复后请完全退出并重新打开游戏。")
@@ -1423,12 +1445,12 @@ struct RootView: View {
                         store.chooseEmulatorApp()
                     }
                     switchReadyRow(title: "prod.keys", ready: store.switchKeysReady,
-                                   detail: store.preferredKeysPath.isEmpty ? "未导入 · 解密游戏所需 · 需你自备" : store.preferredKeysPath,
+                                   detail: store.existingSwitchDataDirectory != nil ? "使用本机 Ryujinx 已有密钥" : (store.preferredKeysPath.isEmpty ? "未导入 · 解密游戏所需 · 需你自备" : store.preferredKeysPath),
                                    button: "导入") {
                         store.chooseSwitchKeys()
                     }
                     switchReadyRow(title: "固件 firmware", ready: store.switchFirmwareReady,
-                                   detail: store.preferredFirmwarePath.isEmpty ? "未设置 · 系统服务所需 · 需你自备" : store.preferredFirmwarePath,
+                                   detail: store.existingSwitchDataDirectory != nil ? "使用本机 Ryujinx 已安装固件与存档、mods" : (store.preferredFirmwarePath.isEmpty ? "未设置 · 系统服务所需 · 需你自备" : store.preferredFirmwarePath),
                                    button: "选择") {
                         store.chooseSwitchFirmware()
                     }
@@ -1545,6 +1567,7 @@ struct RootView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(store.isWineSteamRunning ? .blue : .green)
                 .controlSize(.large)
+                .disabled(store.isSteamLibraryBusy)
                 .help(store.isWineSteamRunning
                       ? "Wine Steam 已在运行。Shiori 会在点击 Wine 程序坞图标时尝试唤起主窗口；如未生效，可用这里手动唤起。"
                       : "启动 Wine Steam 客户端")
@@ -1568,7 +1591,7 @@ struct RootView: View {
                                 }
                                 .buttonStyle(.bordered)
                                 .tint(.blue)
-                                .disabled(store.isDownloadingInstaller)
+                                .disabled(store.isDownloadingInstaller || store.isSteamLibraryBusy)
 
                                 if store.isDownloadingInstaller {
                                     ProgressView().controlSize(.small)
@@ -1584,6 +1607,7 @@ struct RootView: View {
                                 .buttonStyle(.borderedProminent)
                                 .tint(.red)
                                 .controlSize(.small)
+                                .disabled(store.isSteamFileMutationInProgress)
                             }
 
                             if !store.downloadStatusText.isEmpty {
@@ -1596,7 +1620,9 @@ struct RootView: View {
                             Divider()
 
                             Label {
-                                Text("Wine Steam 会在程序坞占两个图标（Steam 本体 + 内置浏览器进程），这是 Wine 的 macOS 驱动给每个有窗口的进程各建一个图标造成的。关掉 Steam 主窗口后，点击当前客户端的任一 Wine 图标时 Shiori 会尝试让 Steam 重建窗口；如果 macOS 没有产生新的激活事件，仍可使用上方的「唤起 Steam 窗口」。")
+                                Text(language == .english
+                                     ? "The Steam client and its interface helpers share one Dock entry within the same Prefix; games keep their own icons. Restart previously running Wine Steam processes to apply this behavior. After closing the main window, click its Dock entry or use Show Steam Window above to reopen it."
+                                     : "同一个 Prefix 中的 Steam 客户端与界面辅助进程共用一个程序坞入口，游戏保留各自图标。已在后台运行的旧 Wine Steam 进程需退出并重新启动后生效。关掉主窗口后，可点击对应程序坞入口或上方的「唤起 Steam 窗口」重新打开。")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -1708,7 +1734,7 @@ struct RootView: View {
 
     private func macSteamGameRow(_ game: SteamLibraryGame) -> some View {
         let installStatus = store.wineSteamInstallStatus(for: game)
-        let wineEntry = store.wineSteamGames.first { $0.appID == game.appID && $0.hasManifest }
+        let wineEntry = store.matchingWineSteamGame(forMacSteamGame: game)
         let readyInWine = wineEntry.map { store.isWineSteamGameReadyToLaunch($0) } ?? false
         let pendingValidation = installStatus?.prefillMetadata != nil && !readyInWine
         let prefilledInWine = pendingValidation || store.isMacSteamGamePrefilledInWine(game)
@@ -1759,6 +1785,7 @@ struct RootView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(.green)
                     .controlSize(.small)
+                    .disabled(store.isSteamLibraryBusy)
                     .help("打开 Wine Steam 安装入口；Steam 只复用校验通过的文件，其余仍会下载")
                 } else if !readyInWine {
                     Button {
@@ -1769,7 +1796,7 @@ struct RootView: View {
                     .buttonStyle(.bordered)
                     .tint(.blue)
                     .controlSize(.small)
-                    .disabled(!store.canPrefillMacSteamGame(game))
+                    .disabled(store.isSteamLibraryBusy || !store.canPrefillMacSteamGame(game))
                     .help("离线复制可能复用的资源/数据文件；跳过 Mac 专用文件和 appmanifest")
                 }
 
@@ -1782,7 +1809,7 @@ struct RootView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(.red)
                     .controlSize(.small)
-                    .disabled(!store.canResetWineSteamGameAndPrefill(game))
+                    .disabled(store.isSteamLibraryBusy || !store.canResetWineSteamGameAndPrefill(game))
                     .help("先删除 Wine Steam 侧该游戏文件，再从 Mac Steam 本地重新预填充")
                 }
             }
@@ -1838,7 +1865,7 @@ struct RootView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(readyToLaunch ? .green : .orange)
                 .controlSize(.small)
-                .disabled(isLaunching)
+                .disabled(isLaunching || store.isSteamLibraryBusy)
                 .help(readyToLaunch ? "通过 Wine Steam 启动该游戏" : "打开 Wine Steam 安装/验证，只复用校验通过的文件")
 
                 HStack(spacing: 8) {
@@ -1858,6 +1885,7 @@ struct RootView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(.red)
                     .controlSize(.small)
+                    .disabled(store.isSteamLibraryBusy)
                 }
             }
         }
@@ -2109,9 +2137,29 @@ struct RootView: View {
 
     private var nameBinding: Binding<String> {
         Binding(
-            get: { store.selectedGame?.name ?? "" },
-            set: { store.renameSelectedGame($0) }
+            get: { nameDraft.text },
+            set: { value in
+                if nameDraft.gameID != store.selectedGameID { synchronizeNameDraft() }
+                nameDraft.text = value
+            }
         )
+    }
+
+    private func commitNameDraft() {
+        guard let change = nameDraft.pendingChange else {
+            if nameDraft.gameID == store.selectedGameID {
+                nameDraft.synchronize(with: store.selectedGame)
+            }
+            return
+        }
+        store.renameGame(change.gameID, to: change.name)
+        let savedGame = store.games.first { $0.id == change.gameID }
+        nameDraft.synchronize(with: savedGame)
+    }
+
+    private func synchronizeNameDraft() {
+        if nameDraft.gameID != store.selectedGameID { commitNameDraft() }
+        nameDraft.synchronize(with: store.selectedGame)
     }
 
     private var launchLanguageBinding: Binding<LaunchLanguageMode> {
@@ -2122,6 +2170,7 @@ struct RootView: View {
     }
 
     private func syncInitialSelection() {
+        synchronizeNameDraft()
         if sidebarSelection == nil {
             sidebarSelection = .home
         }

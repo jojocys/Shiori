@@ -58,6 +58,38 @@ enum SilentUpdateSchedule {
     }
 }
 
+/// Information probes have a stricter busy condition than Sparkle's menu UI.
+/// A displayed update window can accept menu clicks while its session is active.
+@MainActor
+protocol UpdateInformationClient: AnyObject {
+    var canCheckForUpdates: Bool { get }
+    var sessionInProgress: Bool { get }
+    /// Returns whether a new probe was accepted; no state changes on a no-op.
+    func startInformationCheck() -> Bool
+}
+
+@MainActor
+private final class SparkleUpdateInformationClient: UpdateInformationClient {
+    private let updater: SPUUpdater
+
+    init(updater: SPUUpdater) { self.updater = updater }
+
+    var canCheckForUpdates: Bool { updater.canCheckForUpdates }
+    var sessionInProgress: Bool { updater.sessionInProgress }
+
+    func startInformationCheck() -> Bool {
+        guard canCheckForUpdates, !sessionInProgress else { return false }
+        updater.checkForUpdateInformation()
+        return updater.sessionInProgress
+    }
+}
+
+private enum UpdateInformationProbeResult {
+    case started
+    case busy
+    case unavailable
+}
+
 /// Sparkle controller and the toolbar's update state share the app lifetime.
 @MainActor
 final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @preconcurrency SPUStandardUserDriverDelegate {
@@ -71,12 +103,20 @@ final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @prec
     private var automaticCheckTask: Task<Void, Never>?
     private var stateTask: Task<Void, Never>?
     private var toastTask: Task<Void, Never>?
+    private var informationClient: (any UpdateInformationClient)?
+    private var stateBeforeInformationProbe: UpdateToolbarState?
+    private let updateDefaults: UserDefaults
+    private let currentDate: () -> Date
+    private let silentCheckScheduler: ((TimeInterval) -> Void)?
 
     @Published private(set) var canCheckForUpdates = true
     @Published private(set) var toolbarState: UpdateToolbarState = .idle
     @Published private(set) var toolbarToast: UpdateToolbarToast?
 
     init(startingUpdater: Bool = true) {
+        updateDefaults = .standard
+        currentDate = Date.init
+        silentCheckScheduler = nil
         super.init()
         guard Bundle.main.bundleURL.pathExtension == "app",
               Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") is String,
@@ -86,6 +126,9 @@ final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @prec
             updaterDelegate: self,
             userDriverDelegate: self
         )
+        if let updater = controller?.updater {
+            informationClient = SparkleUpdateInformationClient(updater: updater)
+        }
         observation = controller?.updater.observe(\.canCheckForUpdates, options: [.initial, .new]) { [weak self] _, change in
             Task { @MainActor in self?.canCheckForUpdates = change.newValue ?? false }
         }
@@ -93,6 +136,21 @@ final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @prec
             controller?.startUpdater()
             configureSilentAutomaticChecks()
         }
+    }
+
+    /// Headless dependency injection: does not construct or start Sparkle's UI.
+    init(informationClient: any UpdateInformationClient,
+         initialState: UpdateToolbarState = .idle,
+         defaults: UserDefaults,
+         now: @escaping () -> Date,
+         scheduleSilentCheck: @escaping (TimeInterval) -> Void) {
+        self.informationClient = informationClient
+        updateDefaults = defaults
+        currentDate = now
+        silentCheckScheduler = scheduleSilentCheck
+        super.init()
+        toolbarState = initialState
+        canCheckForUpdates = informationClient.canCheckForUpdates
     }
 
     deinit {
@@ -107,12 +165,16 @@ final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @prec
     private func configureSilentAutomaticChecks() {
         guard let updater = controller?.updater else { return }
         updater.automaticallyChecksForUpdates = false
-        let lastCheck = UserDefaults.standard.object(forKey: Self.lastSilentCheckKey) as? Date
+        let lastCheck = updateDefaults.object(forKey: Self.lastSilentCheckKey) as? Date
         scheduleSilentAutomaticCheck(after: SilentUpdateSchedule.delaySinceLastCheck(lastCheck))
     }
 
     private func scheduleSilentAutomaticCheck(after delay: TimeInterval) {
         automaticCheckTask?.cancel()
+        if let silentCheckScheduler {
+            silentCheckScheduler(delay)
+            return
+        }
         automaticCheckTask = Task { [weak self] in
             if delay > 0 {
                 try? await Task.sleep(for: .seconds(delay))
@@ -122,15 +184,16 @@ final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @prec
         }
     }
 
-    private func performSilentAutomaticCheck() {
-        guard let updater = controller?.updater else { return }
-        guard updater.canCheckForUpdates else {
+    func performSilentAutomaticCheck() {
+        switch probeForUpdates(showUnavailableAlert: false) {
+        case .busy:
             scheduleSilentAutomaticCheck(after: Self.busyRetryInterval)
-            return
+        case .started:
+            updateDefaults.set(currentDate(), forKey: Self.lastSilentCheckKey)
+            scheduleSilentAutomaticCheck(after: SilentUpdateSchedule.interval)
+        case .unavailable:
+            break
         }
-        UserDefaults.standard.set(Date(), forKey: Self.lastSilentCheckKey)
-        probeForUpdates()
-        scheduleSilentAutomaticCheck(after: SilentUpdateSchedule.interval)
     }
 
     /// Toolbar checks are informational: no Sparkle window is shown merely to say
@@ -172,14 +235,21 @@ final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @prec
         controller.checkForUpdates(nil)
     }
 
-    private func probeForUpdates() {
-        guard let controller else {
-            UpdateInstallationGate.show("检查更新不可用", "请使用安装到应用程序目录的 Shiori 正式 App。源码运行不支持应用内更新。")
-            return
+    @discardableResult
+    private func probeForUpdates(showUnavailableAlert: Bool = true) -> UpdateInformationProbeResult {
+        guard let informationClient else {
+            if showUnavailableAlert {
+                UpdateInstallationGate.show("检查更新不可用", "请使用安装到应用程序目录的 Shiori 正式 App。源码运行不支持应用内更新。")
+            }
+            return .unavailable
         }
-        guard controller.updater.canCheckForUpdates else { return }
+        guard informationClient.canCheckForUpdates, !informationClient.sessionInProgress else { return .busy }
+        let previousState = toolbarState
+        guard informationClient.startInformationCheck() else { return .busy }
+        stateBeforeInformationProbe = previousState
+        canCheckForUpdates = informationClient.canCheckForUpdates
         transition(to: .checking)
-        controller.updater.checkForUpdateInformation()
+        return .started
     }
 
     private func showStandardUpdateWindow() {
@@ -285,7 +355,18 @@ final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @prec
     }
 
     func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor updateCheck: SPUUpdateCheck, error: Error?) {
-        guard let error else { return }
+        finishUpdateCycle(error: error)
+    }
+
+    /// Both the delegate and headless clients complete through the same state path.
+    func finishUpdateCycle(error: Error?) {
+        let previousState = stateBeforeInformationProbe
+        stateBeforeInformationProbe = nil
+        if let informationClient { canCheckForUpdates = informationClient.canCheckForUpdates }
+        guard let error else {
+            if toolbarState == .checking { transition(to: previousState ?? .idle) }
+            return
+        }
         let nsError = error as NSError
         if nsError.domain == SUSparkleErrorDomain && nsError.code == 1_001 { return }
         showFailureUnlessInstallationIsReady()

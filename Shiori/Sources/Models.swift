@@ -1,6 +1,6 @@
 import Foundation
 
-enum LaunchLanguageMode: String, Codable, CaseIterable, Identifiable {
+enum LaunchLanguageMode: String, Codable, CaseIterable, Identifiable, Sendable {
     case auto
     case japanese
     case chineseSimplified
@@ -17,7 +17,7 @@ enum LaunchLanguageMode: String, Codable, CaseIterable, Identifiable {
 }
 
 /// 游戏平台：Windows（Wine，默认核心）/ Nintendo Switch（原生模拟器）。
-enum GamePlatform: String, Codable {
+enum GamePlatform: String, Codable, Sendable {
     case windows
     case switchEmu = "switch"
 
@@ -36,7 +36,7 @@ enum GamePlatform: String, Codable {
     }
 }
 
-struct GameEntry: Identifiable, Codable, Hashable {
+struct GameEntry: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var name: String
     var gameFolderPath: String
@@ -246,7 +246,7 @@ struct RuntimeCheckReport {
     var gatekeeperBlocked: Bool
 }
 
-struct WineSteamEntryContext: Hashable {
+struct WineSteamEntryContext: Hashable, Sendable {
     var steamExePath: String
     var prefixPath: String
     var sourceLabel: String

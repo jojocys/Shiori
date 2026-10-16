@@ -19,7 +19,7 @@ Shiori 不提供游戏本体、不提供破解、不提供 ROM、不提供 `prod
 - **独立 Prefix**：每个游戏可以拥有自己的 Wine Prefix，减少游戏之间运行库、字体、注册表配置互相污染。
 - **日志可追踪**：每次启动都会写日志，失败时不用靠猜。
 - **Wine Steam 入口**：可以单独管理 Wine 版 Steam 客户端，用来运行 Windows-only Steam 游戏。
-- **Switch 模式**：Switch 游戏不走 Wine，可调用用户自备的原生模拟器，并导入用户自备的 keys / firmware。
+- **Switch 模式**：正式构建默认内置原生模拟器，也支持用户自备模拟器和启动脚本；Switch 游戏不走 Wine。
 
 ## 适合哪些游戏
 
@@ -94,16 +94,22 @@ Windows 游戏常见乱码问题通常和 locale / 字体有关。Shiori 在游�
 
 注意：macOS 原生 Steam 只能运行 macOS 版本游戏；Windows-only 游戏需要 Windows Steam + Wine。
 
+从 Shiori 启动 Wine Steam 时，同一 Prefix 的客户端和界面辅助进程只保留一个 Steam Dock 入口，Overlay 与错误报告进程隐藏独立入口。游戏保留自己的 Dock 入口，并离线读取对应 EXE 的图标；没有可读取的图标时沿用 Wine 原有图标。旧的后台进程须退出后重新启动才会应用。此规则不更改全局 Dock 设置，也不影响独立启动的 Wine。
+
 ### 6. Switch 游戏
 
 Shiori 检测到 `.nsp` / `.xci` 后会切到 Switch 模式。Switch 模式不使用 Wine，而是调用原生 Switch 模拟器。Shiori 只负责保存路径和启动模拟器，`prod.keys`、firmware 固件、ROM 都需要你自己准备并在 App 中手动导入或选择。
 
 你需要自己准备：
 
-- Switch 模拟器 App
+- 内置 Switch 模拟器（源码运行或明确不含模拟器的构建需自行指定 App）
 - 你自己主机导出的 `prod.keys`
 - 你自己主机导出的 firmware 固件目录
 - 你合法持有的 `.nsp` / `.xci`
+
+没有手动导入 keys / 固件时，内置模拟器会复用本机 `~/Library/Application Support/Ryujinx` 中已就绪的数据，沿用现有存档、mods 与设置；否则使用 Shiori 独立受管目录。App 安装包只含模拟器程序，不含这些用户数据。有效的现成启动脚本继续优先；脚本静态指定的模拟器 App 已不存在时，回退至内置模拟器。
+
+内置 Ryujinx 使用辅助应用模式，Dock 由 Shiori 提供入口。游戏运行时重新打开 Shiori 会返回游戏窗口，Shiori 的 Dock 菜单提供“返回 Switch 游戏”和“显示 Shiori 游戏库”。模拟器仍在独立进程中运行，窗口保留 Ryujinx 标识；外部模拟器和自定义脚本继续使用自己的窗口与 Dock 行为。
 
 Shiori 不会也不能打包、下载或代管这些版权文件。
 
@@ -207,7 +213,7 @@ EMBED_XQUARTZ_PKG_PATH="$HOME/Downloads/XQuartz.pkg" \
 ./scripts/build_release_app.sh
 ```
 
-可选内置 Switch 模拟器：
+正式打包优先复用 `/Applications/Shiori.app` 或 `~/Applications/Shiori.app` 中的内置 Switch 模拟器，再查找独立的 `/Applications/Ryujinx.app` 或 `~/Applications/Ryujinx.app`。清理独立模拟器后仍可打包，也可明确指定来源：
 
 ```bash
 cd Shiori
@@ -216,6 +222,7 @@ EMBED_EMULATOR_APP_PATH="/Applications/Ryujinx.app" \
 ```
 
 注意：只能内置模拟器 App 本体，不能打包 ROM、`prod.keys`、固件等版权文件。
+找不到模拟器会停止构建，避免再次产出遗漏模拟器的正式包。需要不含模拟器的构建时，显式设置 `EMBED_SWITCH_EMULATOR=0`。
 
 ## 打包 DMG
 

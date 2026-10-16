@@ -10,6 +10,36 @@ import SwiftUI
 
 private let iconImageCache = NSCache<NSString, NSImage>()
 
+enum GameArtworkLoadResult {
+    case available(NSImage)
+    case unavailable
+
+    var image: NSImage? {
+        if case .available(let image) = self { return image }
+        return nil
+    }
+}
+
+/// Share decoding and revision-aware caching between cards and previews.
+/// A missing or invalid image is a completed result, rather than a loading state.
+@MainActor
+enum GameArtworkLoader {
+    static func load(
+        revision: String,
+        dataProvider: () async -> Data?
+    ) async -> GameArtworkLoadResult {
+        guard !Task.isCancelled else { return .unavailable }
+        let key = revision as NSString
+        if let cached = iconImageCache.object(forKey: key) { return .available(cached) }
+        let data = await dataProvider()
+        guard !Task.isCancelled, let data, let image = NSImage(data: data) else {
+            return .unavailable
+        }
+        iconImageCache.setObject(image, forKey: key)
+        return .available(image)
+    }
+}
+
 // MARK: - 在线封面开关（UserDefaults，默认开；RootView 工具栏 Toggle 写同一键）
 
 private var onlineCoverEnabled: Bool {
@@ -614,7 +644,7 @@ struct GameIconView: View {
     @State private var image: NSImage?
 
     private var signature: String {
-        "game|\(game.id.uuidString)|\(game.iconPath)|\(game.exePath)|\(game.romPath)|\(game.gameFolderPath)|\(game.name)|\(game.platform.rawValue)|\(game.updatedAt.timeIntervalSince1970)"
+        GameArtworkIdentity.revision(for: game)
     }
 
     private var fallbackSymbol: String {
@@ -685,19 +715,13 @@ struct GameIconView: View {
     }
 
     private func load() async {
-        let key = signature as NSString
-        if let cached = iconImageCache.object(forKey: key) {
-            image = cached
-            return
-        }
         image = nil
         let snapshot = game
-        let data = await GameIconResolver.iconData(for: snapshot)
-        guard let data, let resolved = NSImage(data: data) else { return }
-        iconImageCache.setObject(resolved, forKey: key)
-        if key == (signature as NSString) {
-            image = resolved
+        let result = await GameArtworkLoader.load(revision: signature) {
+            await GameIconResolver.iconData(for: snapshot)
         }
+        guard !Task.isCancelled else { return }
+        image = result.image
     }
 }
 
@@ -852,6 +876,10 @@ struct GameCoverPreview: View {
     var onClose: () -> Void
 
     @State private var image: NSImage?
+    @State private var isLoading = true
+    @Environment(\.locale) private var locale
+
+    private var signature: String { GameArtworkIdentity.revision(for: game) }
 
     var body: some View {
         ZStack {
@@ -876,8 +904,17 @@ struct GameCoverPreview: View {
                             .stroke(Color.white.opacity(0.12), lineWidth: 1)
                     )
                     .padding(28)
-            } else {
+            } else if isLoading {
                 ProgressView()
+            } else {
+                Color.black.opacity(0.75)
+                VStack(spacing: 14) {
+                    Image(systemName: game.platform == .switchEmu ? "gamecontroller.fill" : "puzzlepiece.fill")
+                        .font(.system(size: 72, weight: .semibold))
+                    Text(locale.identifier.hasPrefix("en") ? "No cover available" : "暂无封面")
+                        .font(.callout)
+                }
+                .foregroundStyle(.white.opacity(0.8))
             }
 
             VStack {
@@ -898,16 +935,16 @@ struct GameCoverPreview: View {
         .frame(minWidth: 520, minHeight: 640)
         .contentShape(Rectangle())
         .onTapGesture { onClose() }
-        .task(id: game.id) {
-            if let cached = iconImageCache.object(forKey: "preview|\(game.id.uuidString)" as NSString) {
-                image = cached
-                return
-            }
+        .task(id: signature) {
+            image = nil
+            isLoading = true
             let snapshot = game
-            let data = await GameIconResolver.iconData(for: snapshot)
-            guard let data, let resolved = NSImage(data: data) else { return }
-            iconImageCache.setObject(resolved, forKey: "preview|\(game.id.uuidString)" as NSString)
-            image = resolved
+            let result = await GameArtworkLoader.load(revision: signature) {
+                await GameIconResolver.iconData(for: snapshot)
+            }
+            guard !Task.isCancelled else { return }
+            image = result.image
+            isLoading = false
         }
     }
 }

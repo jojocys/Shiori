@@ -21,9 +21,13 @@ enum WineSteamDockReopenPolicy {
     ) -> Bool {
         guard steamMainClientPIDs.isEmpty == false,
               steamClientPIDs.contains(activatedPID),
-              steamClientPIDs.isDisjoint(with: visibleWindowOwnerPIDs) else {
+              !visibleWindowOwnerPIDs.contains(activatedPID) else {
             return false
         }
+
+        // The single Dock entry may belong to Steam's backend. A visible
+        // helper window can still be behind another app; ask Steam to bring
+        // its frontend forward when the activated owner has no own window.
 
         if let lastRequestAt,
            now.timeIntervalSince(lastRequestAt) < requestCooldown {

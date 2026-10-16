@@ -34,12 +34,25 @@ final class AppStore: ObservableObject {
     @Published var launchingWineSteamAppIDs: Set<String> = []
     @Published var isWineSteamRunning = false
     @Published var isSteamPrefillImporting = false
+    @Published private(set) var isSteamLibraryBusy = false
     @Published var steamLibraryStatusText: String = ""
     // Switch：用户自备的 prod.keys 与固件目录（绝不随 App 分发）。
     @Published var preferredKeysPath: String = ""
     @Published var preferredFirmwarePath: String = ""
 
     private let fm = FileManager.default
+    private let homeDirectory: URL
+    private let updateGate: UpdateInstallationGate
+    private let steamOperations = SteamOperationCoordinator()
+    private var steamLibraryBindings: [SteamLibraryBinding] = []
+    private var wantsSteamRefreshConfirmation = false
+    private lazy var steamSnapshotLoader = BackgroundSnapshotLoader<SteamLibraryScanInput, SteamLibrarySnapshot>(
+        operation: { SteamLibrarySnapshot.load($0) },
+        publish: { [weak self] in self?.applySteamSnapshot($0) }
+    )
+    var isSteamFileMutationInProgress: Bool {
+        steamOperations.active?.kind == .importing || steamOperations.active?.kind == .deleting
+    }
     private var wineSteamDockActivationTask: Task<Void, Never>?
     private var lastWineSteamWindowReopenRequestAt: Date?
 
@@ -54,8 +67,11 @@ final class AppStore: ObservableObject {
     var preferredWineBinaryPath: String = "" { didSet { if !isLoadingConfiguration { save() } } }
     var preferredWineAppPath: String = "" { didSet { if !isLoadingConfiguration { save() } } }
 
-    init(appDataDirectory: URL? = nil, initializeRuntime: Bool = true) {
-        let home = Self.storageHome()
+    init(appDataDirectory: URL? = nil, initializeRuntime: Bool = true, homeDirectory: URL? = nil,
+         updateInstallationGate: UpdateInstallationGate? = nil) {
+        let home = homeDirectory ?? Self.storageHome()
+        self.homeDirectory = home
+        self.updateGate = updateInstallationGate ?? .shared
         let legacyAppDataDir = home.appendingPathComponent(".vnlauncher", isDirectory: true)
         let testDataPath = Bundle.main.bundleIdentifier == "com.jojocys.shiori.update-test"
             ? Bundle.main.object(forInfoDictionaryKey: "ShioriTestingDataDirectory") as? String : nil
@@ -118,7 +134,7 @@ final class AppStore: ObservableObject {
             "预填充后请点“安装/验证”；Shiori 会优先打开 Steam 校验入口，让 Steam 校验现有 staging 目录并补缺。",
             "如果 Mac 版和 Windows 版目录结构差异很大，Steam 可能只能复用少量文件，下载量会接近重新下载。",
             "Windows manifest 出现后，Shiori 会比对 Steam 实际安装目录；若提示目录不一致，Steam 可能没有使用预填充目录。",
-            "Wine Steam 可能在程序坞显示多个 wine/Steam 图标：Wine 会把 steamwebhelper.exe、游戏 exe 或 Steam Overlay 等 Windows 子进程分别注册给 macOS；只有一个客户端窗口时不代表重复安装或重复下载。"
+            "从 Shiori 启动后，同一个 Prefix 中的 Steam 客户端与界面辅助进程共用一个程序坞入口；游戏进程使用对应 EXE 的图标。已在后台运行的旧进程需退出后重新启动，才会应用此规则。"
         ]
     }
 
@@ -209,7 +225,7 @@ final class AppStore: ObservableObject {
     }
 
     func configureUpdateSafety() {
-        UpdateInstallationGate.shared.roots = { [weak self] in
+        updateGate.roots = { [weak self] in
             guard let self else { return [] }
             let resources = Bundle.main.resourceURL ?? Bundle.main.bundleURL
             return [resources.appendingPathComponent("EmbeddedWine").path,
@@ -221,9 +237,9 @@ final class AppStore: ObservableObject {
                 self.games.map(\.emulatorAppPath).filter { !$0.isEmpty } +
                 self.resolveWineSteamCleanupContexts().map(\.prefixPath)
         }
-        UpdateInstallationGate.shared.saveBeforeExit = { [weak self] in
+        updateGate.saveBeforeExit = { [weak self] in
             guard let self else { throw UpdateSafetyError.probeFailed("配置尚未就绪。") }
-            guard !self.isManagingFontCompatibility, !self.isSteamPrefillImporting else {
+            guard !self.isManagingFontCompatibility, !self.isSteamLibraryBusy else {
                 throw UpdateSafetyError.probeFailed("请等待运行环境配置或游戏导入完成。")
             }
             try self.saveForUpdate()
@@ -231,11 +247,23 @@ final class AppStore: ObservableObject {
     }
 
     private func permitRuntimeLaunch() -> Bool {
-        guard !UpdateInstallationGate.shared.blocksLaunch else {
+        guard !updateGate.blocksLaunch else {
             statusMessage = "更新已准备安装，请先完成更新并重启 Shiori，再启动游戏或运行环境。"
             return false
         }
+        guard !isManagingFontCompatibility else {
+            statusMessage = "请等待当前字体配置完成，再启动或更改运行环境。"
+            return false
+        }
         return true
+    }
+
+    private func permitIndependentRuntimeLaunch() -> Bool {
+        guard !isSteamLibraryBusy else {
+            statusMessage = "请等待当前 Steam 操作完成，再启动游戏或更改运行环境。"
+            return false
+        }
+        return permitRuntimeLaunch()
     }
 
     func refreshRuntimeStatus(userInitiated: Bool = false) {
@@ -444,12 +472,8 @@ final class AppStore: ObservableObject {
         guard let picked = PlatformPickers.chooseImage(startingAt: start.isEmpty ? nil : start) else { return }
 
         ensureDirs()
-        let ext = picked.pathExtension.isEmpty ? "png" : picked.pathExtension.lowercased()
-        let dest = iconsDir.appendingPathComponent("\(games[idx].id.uuidString).\(ext)")
-        // 清掉同一游戏的旧图标（任意扩展名），再复制新图。
-        removeStoredIconFiles(for: games[idx].id)
         do {
-            try fm.copyItem(at: picked, to: dest)
+            let dest = try GameIconStorage.replace(from: picked, gameID: games[idx].id, in: iconsDir)
             updateSelected { $0.iconPath = dest.path }
             statusMessage = "已设置自定义图标：\(picked.lastPathComponent)"
         } catch {
@@ -499,18 +523,32 @@ final class AppStore: ObservableObject {
     }
 
     var switchKeysReady: Bool {
-        !preferredKeysPath.isEmpty && fm.fileExists(atPath: preferredKeysPath)
+        (!preferredKeysPath.isEmpty && fm.fileExists(atPath: preferredKeysPath)) || existingSwitchDataDirectory != nil
     }
 
     var switchFirmwareReady: Bool {
-        !preferredFirmwarePath.isEmpty && fm.fileExists(atPath: preferredFirmwarePath)
+        (!preferredFirmwarePath.isEmpty && fm.fileExists(atPath: preferredFirmwarePath)) || existingSwitchDataDirectory != nil
+    }
+
+    var existingSwitchDataDirectory: URL? {
+        guard preferredKeysPath.isEmpty, preferredFirmwarePath.isEmpty,
+              let bundled = SwitchRuntime.resolveBundledEmulator(),
+              SwitchRuntime.executable(in: bundled) != nil else { return nil }
+        return SwitchRuntime.existingUserDataDirectory()
     }
 
     func renameSelectedGame(_ name: String) {
+        guard let id = selectedGameID else { return }
+        renameGame(id, to: name)
+    }
+
+    func renameGame(_ id: UUID, to name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        updateSelected { game in
-            game.name = trimmed.isEmpty ? "未命名游戏" : trimmed
-        }
+        let committed = trimmed.isEmpty ? "未命名游戏" : trimmed
+        guard let index = games.firstIndex(where: { $0.id == id }), games[index].name != committed else { return }
+        games[index].name = committed
+        games[index].updatedAt = Date()
+        save()
     }
 
     func setSelectedLaunchLanguage(_ mode: LaunchLanguageMode) {
@@ -526,7 +564,7 @@ final class AppStore: ObservableObject {
     }
 
     func repairSelectedGameFonts() {
-        guard permitRuntimeLaunch() else { return }
+        guard permitIndependentRuntimeLaunch() else { return }
         guard let game = selectedGame, game.platform == .windows else {
             statusMessage = "请先选择一个 Windows 游戏配置"
             return
@@ -572,6 +610,7 @@ final class AppStore: ObservableObject {
     }
 
     func restoreSelectedGameFonts() {
+        guard permitIndependentRuntimeLaunch() else { return }
         guard let game = selectedGame, game.platform == .windows else {
             statusMessage = "请先选择一个 Windows 游戏配置"
             return
@@ -651,23 +690,88 @@ final class AppStore: ObservableObject {
     }
 
     func refreshSteamLibraries(userInitiated: Bool = false) {
-        let home = Self.storageHome()
-        let wineSteamappsURLs = wineSteamappsURLsForManagement()
-        macSteamGames = SteamLibraryManager.scanMacGames(home: home)
-        wineSteamGames = SteamLibraryManager.scanWineGames(steamappsURLs: wineSteamappsURLs)
-        wineSteamInstallStatuses = SteamLibraryManager.scanInstallStatuses(steamappsURLs: wineSteamappsURLs)
-        refreshWineSteamRunningState()
+        wantsSteamRefreshConfirmation = wantsSteamRefreshConfirmation || userInitiated
+        guard !isSteamLibraryBusy else { return }
+        steamSnapshotLoader.request(SteamLibraryScanInput(home: homeDirectory, appDataDirectory: appDataDir,
+            contexts: resolveWineSteamCleanupContexts()), force: userInitiated)
+    }
 
+    func applySteamSnapshot(_ snapshot: SteamLibrarySnapshot) {
+        guard !isSteamLibraryBusy else { return }
+        macSteamGames = snapshot.macGames
+        wineSteamGames = snapshot.wineGames
+        wineSteamInstallStatuses = snapshot.installStatuses
+        steamLibraryBindings = snapshot.bindings
+        isWineSteamRunning = snapshot.isRunning
         let summary = "Mac Steam \(macSteamGames.count) 个 · Wine Steam \(wineSteamGames.count) 个"
         steamLibraryStatusText = summary
-        if userInitiated {
+        if wantsSteamRefreshConfirmation {
             statusMessage = "已刷新 Steam 库：\(summary)"
+            wantsSteamRefreshConfirmation = false
         }
     }
 
+    func beginSteamOperation(_ kind: SteamOperationCoordinator.Kind) -> SteamOperationCoordinator.Lease? {
+        if kind == .stopping {
+            // A staged update blocks new launches, but the user must still be
+            // able to close Steam before the update can be installed.
+            guard !isManagingFontCompatibility else {
+                statusMessage = "请等待字体配置完成，再关闭 Wine Steam。"
+                return nil
+            }
+        } else {
+            guard permitRuntimeLaunch() else { return nil }
+        }
+        guard let lease = steamOperations.begin(kind) else {
+            statusMessage = "已有 Steam 操作正在进行，请等待完成。"
+            return nil
+        }
+        isSteamLibraryBusy = true
+        isSteamPrefillImporting = kind == .importing
+        steamSnapshotLoader.cancel()
+        return lease
+    }
+
+    func finishSteamOperation(_ lease: SteamOperationCoordinator.Lease) {
+        guard steamOperations.active == lease else { return }
+        steamOperations.finish(lease)
+        isSteamLibraryBusy = false
+        isSteamPrefillImporting = false
+        refreshSteamLibraries(userInitiated: false)
+    }
+
+    private func contextForSteamGame(_ game: SteamLibraryGame) -> WineSteamEntryContext? {
+        let wineGame = game.source == .mac ? matchingWineSteamGame(forMacSteamGame: game) : game
+        if let wineGame {
+            guard let context = SteamLibraryRouting.context(for: wineGame, bindings: steamLibraryBindings),
+                  resolveWineSteamCleanupContexts().contains(context) else { return nil }
+            return context
+        }
+        return game.source == .mac ? resolveWineSteamEntryContext() : nil
+    }
+
+    private func contextsManagingLibrary(_ library: URL) -> [WineSteamEntryContext] {
+        let path = SteamLibraryPathSafety.canonical(library).path
+        return resolveWineSteamCleanupContexts().filter { context in
+            let primary = SteamLibraryManager.wineSteamappsURL(for: context)
+            let libraries = [primary] + SteamLibraryManager.steamappsURLsFromLibraryFolders(
+                steamappsURL: primary, winePrefixURL: URL(fileURLWithPath: context.prefixPath))
+            return libraries.contains { SteamLibraryPathSafety.canonical($0).path == path }
+        }
+    }
+
+    private func stopSteamContexts(_ contexts: [WineSteamEntryContext]) async -> WineSteamProcessService.StopResult {
+        let preferred = preferredWineBinaryPath
+        return await Task.detached(priority: .userInitiated) {
+            let wine = RuntimeManager.resolveWineBinary(preferred: preferred) ?? ""
+            return WineSteamProcessService.stop(contexts: contexts, wineBinary: wine)
+        }.value
+    }
+
     func wineSteamInstallStatus(for game: SteamLibraryGame) -> SteamInstallStatus? {
-        guard !game.appID.isEmpty else { return nil }
-        return wineSteamInstallStatuses[game.appID]
+        let wineGame = game.source == .mac ? matchingWineSteamGame(forMacSteamGame: game) : game
+        guard let wineGame, !wineGame.appID.isEmpty else { return nil }
+        return wineSteamInstallStatuses[wineGame.installationIdentity]
     }
 
     func isWineSteamGameReadyToLaunch(_ game: SteamLibraryGame) -> Bool {
@@ -677,13 +781,13 @@ final class AppStore: ObservableObject {
     }
 
     func canPrefillMacSteamGame(_ game: SteamLibraryGame) -> Bool {
-        guard !isSteamPrefillImporting else { return false }
+        guard !isSteamLibraryBusy else { return false }
         guard !game.installPath.isEmpty, fm.fileExists(atPath: game.installPath) else { return false }
         return !wineSteamGames.contains { $0.appID == game.appID && $0.hasManifest }
     }
 
     func canResetWineSteamGameAndPrefill(_ game: SteamLibraryGame) -> Bool {
-        guard !isSteamPrefillImporting else { return false }
+        guard !isSteamLibraryBusy else { return false }
         guard !game.installPath.isEmpty, fm.fileExists(atPath: game.installPath) else { return false }
         return matchingWineSteamGame(forMacSteamGame: game) != nil
     }
@@ -693,91 +797,74 @@ final class AppStore: ObservableObject {
     }
 
     func matchingWineSteamGame(forMacSteamGame game: SteamLibraryGame) -> SteamLibraryGame? {
-        if !game.appID.isEmpty, let match = wineSteamGames.first(where: { $0.appID == game.appID }) {
-            return match
-        }
-        return wineSteamGames.first { $0.installDir.caseInsensitiveCompare(game.installDir) == .orderedSame }
+        let appMatches = game.appID.isEmpty ? [] : wineSteamGames.filter { $0.appID == game.appID }
+        let matches = appMatches.isEmpty
+            ? wineSteamGames.filter { $0.installDir.caseInsensitiveCompare(game.installDir) == .orderedSame }
+            : appMatches
+        return matches.first(where: { $0.hasManifest }) ?? matches.first
     }
 
     func prefillMacSteamGameToWine(_ game: SteamLibraryGame) {
-        guard canPrefillMacSteamGame(game) else {
-            statusMessage = "该游戏已在 Wine Steam 安装，或当前无法导入。"
-            return
-        }
-
-        stopWineSteamProcesses()
-        let targetSteamappsURL = primaryWineSteamappsURL()
-        isSteamPrefillImporting = true
-        steamLibraryStatusText = "正在本地预填充：\(game.name)"
-        statusMessage = "正在从 Mac Steam 本地导入：\(game.name)。只复制可能复用的资源/数据文件，不复制 Mac 安装清单或 Mac 专用文件。"
-
-        Task {
+        guard canPrefillMacSteamGame(game), let lease = beginSteamOperation(.importing) else { return }
+        let target = primaryWineSteamappsURL()
+        let allowedRoots = wineSteamappsURLsForManagement()
+        let protectedRoots = SteamLibraryManager.macSteamappsURLs(home: homeDirectory)
+        let contexts = contextsManagingLibrary(target)
+        statusMessage = "正在从 Mac Steam 本地预填充：\(game.name)"
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer { self.finishSteamOperation(lease) }
+            let stopped = await self.stopSteamContexts(contexts)
+            guard stopped.didStop else {
+                self.statusMessage = "无法确认 Wine Steam 已完全退出，已取消导入。"
+                return
+            }
             do {
                 let report = try await Task.detached(priority: .userInitiated) {
-                    try SteamLibraryManager.prefillWineSteam(from: game, to: targetSteamappsURL)
+                    try SteamLibraryManager.prefillWineSteam(from: game, to: target,
+                        protectedRoots: protectedRoots, allowedRoots: allowedRoots)
                 }.value
-                await MainActor.run {
-                    self.isSteamPrefillImporting = false
-                    self.refreshSteamLibraries()
-                    self.steamLibraryStatusText = "已预填充 \(report.copiedFiles) 个文件，跳过 \(report.skippedFiles) 项"
-                    self.statusMessage = "已本地预填充 \(game.name)：\(report.copiedSizeLabel)。这不是完整安装；Wine Steam 仍会下载 Windows 文件和校验不匹配的内容。"
-                }
-            } catch {
-                await MainActor.run {
-                    self.isSteamPrefillImporting = false
-                    self.refreshSteamLibraries()
-                    self.statusMessage = "导入失败：\(error.localizedDescription)"
-                }
-            }
+                self.steamLibraryStatusText = "已预填充 \(report.copiedFiles) 个文件，跳过 \(report.skippedFiles) 项"
+                self.statusMessage = "已本地预填充 \(game.name)：\(report.copiedSizeLabel)。这不是完整安装；Wine Steam 仍会下载 Windows 文件和校验不匹配的内容。"
+            } catch { self.statusMessage = "导入失败：\(error.localizedDescription)" }
         }
+        steamOperations.track(task, for: lease)
     }
 
     func resetWineSteamGameAndPrefill(_ game: SteamLibraryGame) {
-        guard let existingGame = matchingWineSteamGame(forMacSteamGame: game) else {
+        guard let existing = matchingWineSteamGame(forMacSteamGame: game) else {
             prefillMacSteamGameToWine(game)
             return
         }
-        guard !isInsideMacSteamLibrary(existingGame) else {
-            statusMessage = "拒绝重置：Wine 侧路径指向 Mac Steam 原生库。"
+        guard !isInsideMacSteamLibrary(existing),
+              !game.installPath.isEmpty, fm.fileExists(atPath: game.installPath) else {
+            statusMessage = "源目录不可用，或目标涉及 Mac Steam 原生库，已拒绝重置。"
             return
         }
-        guard !isSteamPrefillImporting else {
-            statusMessage = "已有导入任务在进行。"
-            return
-        }
-        guard !game.installPath.isEmpty, fm.fileExists(atPath: game.installPath) else {
-            statusMessage = "Mac Steam 源目录不存在，无法重新预填充。"
-            return
-        }
-
-        stopWineSteamProcesses()
-        let targetSteamappsURL = existingGame.steamappsPath.isEmpty
-            ? primaryWineSteamappsURL()
-            : URL(fileURLWithPath: existingGame.steamappsPath, isDirectory: true)
-        isSteamPrefillImporting = true
-        steamLibraryStatusText = "正在重置并重新预填充：\(game.name)"
-        statusMessage = "正在删除 Wine 侧旧文件并从 Mac Steam 本地重新预填充：\(game.name)。"
-
-        Task {
+        guard let lease = beginSteamOperation(.importing) else { return }
+        let target = URL(fileURLWithPath: existing.steamappsPath, isDirectory: true)
+        let allowedRoots = wineSteamappsURLsForManagement()
+        let protectedRoots = SteamLibraryManager.macSteamappsURLs(home: homeDirectory)
+        let contexts = contextsManagingLibrary(target)
+        statusMessage = "正在重置 Wine 侧文件并重新预填充：\(game.name)"
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer { self.finishSteamOperation(lease) }
+            let stopped = await self.stopSteamContexts(contexts)
+            guard stopped.didStop else {
+                self.statusMessage = "无法确认 Wine Steam 已完全退出，已取消重置。"
+                return
+            }
             do {
                 let report = try await Task.detached(priority: .userInitiated) {
-                    try SteamLibraryManager.deleteWineGame(existingGame)
-                    return try SteamLibraryManager.prefillWineSteam(from: game, to: targetSteamappsURL)
+                    try SteamLibraryManager.deleteWineGame(existing, protectedRoots: protectedRoots, allowedRoots: allowedRoots)
+                    return try SteamLibraryManager.prefillWineSteam(from: game, to: target,
+                        protectedRoots: protectedRoots, allowedRoots: allowedRoots)
                 }.value
-                await MainActor.run {
-                    self.isSteamPrefillImporting = false
-                    self.refreshSteamLibraries()
-                    self.steamLibraryStatusText = "已重新预填充 \(report.copiedFiles) 个文件，跳过 \(report.skippedFiles) 项"
-                    self.statusMessage = "已删除 Wine 侧旧文件并重新预填充 \(game.name)：\(report.copiedSizeLabel)。下一步请点“安装/验证”。"
-                }
-            } catch {
-                await MainActor.run {
-                    self.isSteamPrefillImporting = false
-                    self.refreshSteamLibraries()
-                    self.statusMessage = "重置预填充失败：\(error.localizedDescription)"
-                }
-            }
+                self.statusMessage = "已重新预填充 \(game.name)：\(report.copiedSizeLabel)。下一步请点“安装/验证”。"
+            } catch { self.statusMessage = "重置预填充失败：\(error.localizedDescription)" }
         }
+        steamOperations.track(task, for: lease)
     }
 
     func deleteWineSteamGame(_ game: SteamLibraryGame) {
@@ -785,25 +872,27 @@ final class AppStore: ObservableObject {
             statusMessage = "拒绝删除：该路径位于 Mac Steam 原生库内。请在 Mac Steam 中管理它。"
             return
         }
-        stopWineSteamProcesses()
+        guard let lease = beginSteamOperation(.deleting) else { return }
+        let allowedRoots = wineSteamappsURLsForManagement()
+        let protectedRoots = SteamLibraryManager.macSteamappsURLs(home: homeDirectory)
+        let contexts = contextsManagingLibrary(URL(fileURLWithPath: game.steamappsPath))
         statusMessage = "正在删除 Wine Steam 文件：\(game.name)"
-
-        Task {
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer { self.finishSteamOperation(lease) }
+            let stopped = await self.stopSteamContexts(contexts)
+            guard stopped.didStop else {
+                self.statusMessage = "无法确认 Wine Steam 已完全退出，已取消删除。"
+                return
+            }
             do {
                 try await Task.detached(priority: .userInitiated) {
-                    try SteamLibraryManager.deleteWineGame(game)
+                    try SteamLibraryManager.deleteWineGame(game, protectedRoots: protectedRoots, allowedRoots: allowedRoots)
                 }.value
-                await MainActor.run {
-                    self.refreshSteamLibraries()
-                    self.statusMessage = "已删除 Wine Steam 文件：\(game.name)"
-                }
-            } catch {
-                await MainActor.run {
-                    self.refreshSteamLibraries()
-                    self.statusMessage = "删除失败：\(error.localizedDescription)"
-                }
-            }
+                self.statusMessage = "已删除 Wine Steam 文件：\(game.name)"
+            } catch { self.statusMessage = "删除失败：\(error.localizedDescription)" }
         }
+        steamOperations.track(task, for: lease)
     }
 
     func openWineSteamGameFolder(_ game: SteamLibraryGame) {
@@ -816,35 +905,39 @@ final class AppStore: ObservableObject {
 
     @discardableResult
     func launchWineSteamInstall(for game: SteamLibraryGame, afterPrefillReport: SteamPrefillReport? = nil) -> Bool {
-        guard !game.appID.isEmpty else {
-            statusMessage = "该预填充目录没有 AppID，无法自动打开 Steam 安装入口。"
+        guard !game.appID.isEmpty, let context = contextForSteamGame(game) else {
+            statusMessage = "未找到该游戏所属库的 Wine Steam，请安装客户端或刷新游戏库后重试。"
             return false
         }
-        let hasWineManifest = game.hasManifest || !(wineSteamInstallStatus(for: game)?.manifestPath.isEmpty ?? true)
-        let steamURL = hasWineManifest ? "steam://validate/\(game.appID)" : "steam://install/\(game.appID)"
-        let message = hasWineManifest
-            ? "已打开 Wine Steam 校验入口：\(game.name)。Steam 会校验现有目录并只下载缺失或不匹配的文件。"
-            : "已打开 Wine Steam 安装入口：\(game.name)。请在 Steam 安装窗口确认，确认后才会生成 Windows manifest。"
-        let ok = launchWineSteam(
-            extraArguments: [steamURL],
-            successMessage: message,
-            missingSteamMessage: "未找到 Windows Steam（Steam.exe）。请先安装 Wine Steam，再安装 \(game.name)。",
-            allowInstallerFallback: false
-        )
-        if ok, let afterPrefillReport {
-            steamLibraryStatusText = "已预填充 \(afterPrefillReport.copiedFiles) 个文件，等待 Steam 验证"
+        guard let lease = beginSteamOperation(.launching) else { return false }
+        let url = SteamLibraryRouting.installURL(for: game,
+            matchingWineGame: game.source == .mac ? matchingWineSteamGame(forMacSteamGame: game) : game,
+            status: wineSteamInstallStatus(for: game))
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer { self.finishSteamOperation(lease) }
+            _ = await self.launchWineSteam(extraArguments: [url],
+                successMessage: "已向该库所属 Wine Steam 发送安装/验证请求：\(game.name)",
+                missingSteamMessage: "未找到该游戏所属的 Wine Steam。",
+                allowInstallerFallback: false, contextOverride: context)
+            if !Task.isCancelled, let report = afterPrefillReport {
+                self.steamLibraryStatusText = "已预填充 \(report.copiedFiles) 个文件，等待 Steam 验证"
+            }
         }
-        return ok
+        steamOperations.track(task, for: lease)
+        return true
     }
 
     func launchWineSteamEntry() {
-        _ = launchWineSteam(
-            extraArguments: [],
-            successMessage: nil,
-            missingSteamMessage: "未找到 Windows Steam（Steam.exe）。请先安装 Wine 版 Steam。",
-            allowInstallerFallback: true
-        )
-        refreshWineSteamRunningState()
+        guard let lease = beginSteamOperation(.launching) else { return }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer { self.finishSteamOperation(lease) }
+            _ = await self.launchWineSteam(extraArguments: [], successMessage: nil,
+                missingSteamMessage: "未找到 Windows Steam（Steam.exe）。请先安装 Wine 版 Steam。",
+                allowInstallerFallback: true)
+        }
+        steamOperations.track(task, for: lease)
     }
 
     /// 将 macOS 程序坞对 Wine 前台进程的激活，转成 Steam 自身的主窗口重开请求。
@@ -866,7 +959,7 @@ final class AppStore: ObservableObject {
             } catch {
                 return
             }
-            self?.requestWineSteamWindowFromDockIfNeeded(activatedPID: activatedPID)
+            await self?.requestWineSteamWindowFromDockIfNeeded(activatedPID: activatedPID)
         }
     }
 
@@ -874,18 +967,29 @@ final class AppStore: ObservableObject {
     /// 预填充（无清单/AppID）仍转到安装/验证入口。
     func launchWineSteamGame(_ game: SteamLibraryGame) {
         guard isWineSteamGameReadyToLaunch(game) else {
-            launchWineSteamInstall(for: game)
+            _ = launchWineSteamInstall(for: game)
             return
         }
-        guard !game.appID.isEmpty, launchingWineSteamAppIDs.insert(game.appID).inserted else { return }
-
-        Task { [weak self] in
-            await self?.launchWineSteamGameAfterClientReady(game)
+        guard let context = contextForSteamGame(game) else {
+            statusMessage = "未找到该游戏所属库的 Wine Steam，请刷新游戏库后重试。"
+            return
         }
+        guard let lease = beginSteamOperation(.launching) else { return }
+        let identity = game.installationIdentity
+        launchingWineSteamAppIDs.insert(identity)
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.launchingWineSteamAppIDs.remove(identity)
+                self.finishSteamOperation(lease)
+            }
+            await self.launchWineSteamGameAfterClientReady(game, in: context)
+        }
+        steamOperations.track(task, for: lease)
     }
 
     func isLaunchingWineSteamGame(_ game: SteamLibraryGame) -> Bool {
-        !game.appID.isEmpty && launchingWineSteamAppIDs.contains(game.appID)
+        launchingWineSteamAppIDs.contains(game.installationIdentity)
     }
 
     /// 该 Wine Steam 游戏是否曾由 Shiori 确认成功启动。
@@ -893,78 +997,65 @@ final class AppStore: ObservableObject {
         !appID.isEmpty && launchedWineSteamAppIDs.contains(appID)
     }
 
-    private func launchWineSteamGameAfterClientReady(_ game: SteamLibraryGame) async {
-        defer { launchingWineSteamAppIDs.remove(game.appID) }
-
-        statusMessage = "正在启动 Wine Steam，随后将启动：\(game.name)"
-        guard launchWineSteam(
-            extraArguments: [],
-            successMessage: "正在等待 Wine Steam 客户端就绪…",
-            missingSteamMessage: "未找到 Windows Steam（Steam.exe）。请先安装 Wine 版 Steam，再启动 \(game.name)。",
-            allowInstallerFallback: false
-        ), let context = resolveWineSteamEntryContext() else {
-            return
-        }
-
-        guard await waitForWineSteamClient(in: context, timeout: 20) else {
+    private func launchWineSteamGameAfterClientReady(_ game: SteamLibraryGame, in context: WineSteamEntryContext) async {
+        guard !Task.isCancelled else { return }
+        statusMessage = "正在启动游戏所属的 Wine Steam：\(game.name)"
+        guard await launchWineSteam(extraArguments: [], successMessage: "正在等待 Wine Steam 客户端就绪…",
+            missingSteamMessage: "未找到该游戏所属的 Wine Steam。", allowInstallerFallback: false,
+            contextOverride: context), !Task.isCancelled else { return }
+        let ready = await waitForWineSteamClient(in: context, timeout: 20)
+        guard !Task.isCancelled else { return }
+        guard ready else {
             isWineSteamRunning = false
             statusMessage = "未能确认 Wine Steam 客户端已启动，已取消启动 \(game.name)。"
             return
         }
-
         isWineSteamRunning = true
-        let existingGamePIDs = wineGameProcessIDs(game, in: context)
-        if !existingGamePIDs.isEmpty {
+        let existing = await Task.detached(priority: .utility) {
+            WineSteamProcessService.gamePIDs(game, in: context)
+        }.value
+        guard !Task.isCancelled else { return }
+        if !existing.isEmpty {
             confirmWineSteamGameLaunch(game, message: "\(game.name) 已在运行。")
             return
         }
-
-        // Steam.exe 出现后留出短暂初始化时间，再向已运行的客户端发送协议请求。
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        do { try await Task.sleep(for: .seconds(1)) } catch { return }
+        guard await launchWineSteam(extraArguments: ["steam://rungameid/\(game.appID)"],
+            successMessage: "已发送启动请求，正在确认游戏进程…", missingSteamMessage: "未找到游戏所属的 Wine Steam。",
+            allowInstallerFallback: false, contextOverride: context), !Task.isCancelled else { return }
+        let launched = await waitForWineSteamGame(game, in: context, excluding: existing, timeout: 30)
         guard !Task.isCancelled else { return }
-
-        statusMessage = "Wine Steam 已就绪，正在启动：\(game.name)"
-        guard launchWineSteam(
-            extraArguments: ["steam://rungameid/\(game.appID)"],
-            successMessage: "已向 Wine Steam 发送启动请求，正在确认游戏进程…",
-            missingSteamMessage: "未找到 Windows Steam（Steam.exe）。请先安装 Wine 版 Steam，再启动 \(game.name)。",
-            allowInstallerFallback: false
-        ) else {
-            return
-        }
-
-        if await waitForWineSteamGame(game, in: context, excluding: existingGamePIDs, timeout: 30) {
+        if launched {
             confirmWineSteamGameLaunch(game, message: "已确认启动：\(game.name)")
         } else {
-            statusMessage = "Wine Steam 已打开并发送了启动请求，但 30 秒内未检测到 \(game.name) 的进程；请在 Steam 客户端中查看提示。"
+            statusMessage = "已发送启动请求，但 30 秒内未检测到 \(game.name) 的进程；请在 Steam 客户端中查看提示。"
         }
     }
 
     private func waitForWineSteamClient(in context: WineSteamEntryContext, timeout: TimeInterval) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
-        repeat {
-            if !steamMainClientProcessIDs(openingFilesUnder: context.prefixPath).isEmpty {
-                return true
-            }
-            try? await Task.sleep(nanoseconds: 500_000_000)
-        } while !Task.isCancelled && Date() < deadline
+        while !Task.isCancelled, Date() < deadline {
+            let pids = await Task.detached(priority: .utility) {
+                WineSteamProcessService.mainClientPIDs(in: context.prefixPath)
+            }.value
+            guard !Task.isCancelled else { return false }
+            if !pids.isEmpty { return true }
+            do { try await Task.sleep(for: .milliseconds(500)) } catch { return false }
+        }
         return false
     }
 
-    private func waitForWineSteamGame(
-        _ game: SteamLibraryGame,
-        in context: WineSteamEntryContext,
-        excluding existingPIDs: Set<Int32>,
-        timeout: TimeInterval
-    ) async -> Bool {
+    private func waitForWineSteamGame(_ game: SteamLibraryGame, in context: WineSteamEntryContext,
+                                    excluding existingPIDs: Set<Int32>, timeout: TimeInterval) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
-        repeat {
-            let detectedPIDs = wineGameProcessIDs(game, in: context)
-            if !detectedPIDs.subtracting(existingPIDs).isEmpty {
-                return true
-            }
-            try? await Task.sleep(nanoseconds: 750_000_000)
-        } while !Task.isCancelled && Date() < deadline
+        while !Task.isCancelled, Date() < deadline {
+            let pids = await Task.detached(priority: .utility) {
+                WineSteamProcessService.gamePIDs(game, in: context)
+            }.value
+            guard !Task.isCancelled else { return false }
+            if !pids.subtracting(existingPIDs).isEmpty { return true }
+            do { try await Task.sleep(for: .milliseconds(750)) } catch { return false }
+        }
         return false
     }
 
@@ -981,12 +1072,13 @@ final class AppStore: ObservableObject {
         missingSteamMessage: String,
         allowInstallerFallback: Bool,
         contextOverride: WineSteamEntryContext? = nil
-    ) -> Bool {
-        guard permitRuntimeLaunch() else { return false }
-        refreshRuntimeStatus()
-        let wineBinary = runtimeReport.resolvedWineBinaryPath.isEmpty
-            ? (RuntimeManager.resolveWineBinary(preferred: preferredWineBinaryPath) ?? "")
-            : runtimeReport.resolvedWineBinaryPath
+    ) async -> Bool {
+        guard !Task.isCancelled, permitRuntimeLaunch() else { return false }
+        let preferred = preferredWineBinaryPath
+        let wineBinary = await Task.detached(priority: .userInitiated) {
+            RuntimeManager.resolveWineBinary(preferred: preferred) ?? ""
+        }.value
+        guard !Task.isCancelled, permitRuntimeLaunch() else { return false }
 
         guard !wineBinary.isEmpty else {
             statusMessage = "未检测到 Wine。请先在 P2 选择/安装 Wine。"
@@ -1012,9 +1104,15 @@ final class AppStore: ObservableObject {
         var arguments = extraArguments
         var reopenedExistingClient = false
         if extraArguments.isEmpty {
-            let existingSteamPIDs = steamMainClientProcessIDs(openingFilesUnder: context.prefixPath)
+            let existingSteamPIDs = await Task.detached(priority: .utility) {
+                WineSteamProcessService.mainClientPIDs(in: context.prefixPath)
+            }.value
+            guard !Task.isCancelled else { return false }
             if existingSteamPIDs.isEmpty {
-                cleanupCount = clearStaleWineSteamShellProcesses(openingFilesUnder: context.prefixPath)
+                cleanupCount = await Task.detached(priority: .userInitiated) {
+                    WineSteamProcessService.clearStaleShell(in: context.prefixPath)
+                }.value
+                guard !Task.isCancelled else { return false }
             } else {
                 // 客户端还活着，多半只是主窗口被关掉了（Steam 关窗＝隐藏到托盘）。
                 // 这时再起一个客户端没有意义，而什么都不做又会让用户只能杀进程重开，
@@ -1037,6 +1135,21 @@ final class AppStore: ObservableObject {
         var env = ProcessInfo.processInfo.environment
         env["WINEPREFIX"] = context.prefixPath
         env["WINEDEBUG"] = "-all"
+        if let adapter = WineDockIcons.adapter {
+            let games = wineSteamGames.filter {
+                SteamLibraryRouting.context(for: $0, bindings: steamLibraryBindings)?.prefixPath == context.prefixPath
+            }
+            let original = env
+            let cache = iconsDir.appendingPathComponent("wine-dock", isDirectory: true)
+            env = await Task.detached(priority: .utility) {
+                let executables = WineDockIcons.executables(in: games.map { URL(fileURLWithPath: $0.installPath) })
+                let manifest = try? WineDockIcons.prepare(prefix: URL(fileURLWithPath: context.prefixPath),
+                    gameExecutables: executables, cache: cache,
+                    steamDirectory: URL(fileURLWithPath: context.steamExePath).deletingLastPathComponent())
+                return WineDockIcons.environment(original, library: adapter, manifest: manifest)
+            }.value
+        }
+        guard !Task.isCancelled, permitRuntimeLaunch() else { return false }
         process.environment = env
 
         do {
@@ -1059,65 +1172,30 @@ final class AppStore: ObservableObject {
     }
 
     func stopWineSteamProcesses() {
-        refreshRuntimeStatus()
-        let wineBinary = runtimeReport.resolvedWineBinaryPath.isEmpty
-            ? (RuntimeManager.resolveWineBinary(preferred: preferredWineBinaryPath) ?? "")
-            : runtimeReport.resolvedWineBinaryPath
+        if steamOperations.cancelLaunch() {
+            launchingWineSteamAppIDs.removeAll()
+            isSteamLibraryBusy = false
+        }
+        wineSteamDockActivationTask?.cancel()
+        guard let lease = beginSteamOperation(.stopping) else { return }
         let contexts = resolveWineSteamCleanupContexts()
-        var commandHits = 0
-        var signaledPIDs = Set<Int32>()
-
-        for context in contexts {
-            if
-                !wineBinary.isEmpty,
-                let wineserver = resolveWineserverPath(fromWineBinary: wineBinary),
-                !context.prefixPath.isEmpty
-            {
-                if runSyncCommand(wineserver, arguments: ["-k"], extraEnvironment: ["WINEPREFIX": context.prefixPath]) == 0 {
-                    commandHits += 1
-                }
-            }
-
-            let prefixPIDs = wineProcessIDs(openingFilesUnder: context.prefixPath)
-            if !prefixPIDs.isEmpty {
-                signaledPIDs.formUnion(prefixPIDs)
-                _ = signalProcessIDs(prefixPIDs, signal: "TERM")
+        statusMessage = "正在关闭 Wine Steam…"
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer { self.finishSteamOperation(lease) }
+            let result = await self.stopSteamContexts(contexts)
+            if result.didStop {
+                self.isWineSteamRunning = false
+                self.statusMessage = result.totalHits == 0 ? "未发现正在运行的 Wine Steam 进程。" : "已关闭 Wine Steam 相关进程（命中 \(result.totalHits) 项）。"
+            } else {
+                self.statusMessage = "无法确认 Wine Steam 已完全退出；尚未对游戏文件执行其他操作。"
             }
         }
-
-        Thread.sleep(forTimeInterval: 0.5)
-
-        var remainingPIDs = Set<Int32>()
-        for context in contexts {
-            remainingPIDs.formUnion(wineProcessIDs(openingFilesUnder: context.prefixPath))
-        }
-        _ = signalProcessIDs(remainingPIDs, signal: "KILL")
-        signaledPIDs.formUnion(remainingPIDs)
-
-        Thread.sleep(forTimeInterval: 0.2)
-
-        var finalRemainingPIDs = Set<Int32>()
-        for context in contexts {
-            finalRemainingPIDs.formUnion(wineProcessIDs(openingFilesUnder: context.prefixPath))
-        }
-
-        if !finalRemainingPIDs.isEmpty {
-            statusMessage = "已请求关闭 Wine Steam，但仍有 \(finalRemainingPIDs.count) 个 Wine 残留进程。"
-            return
-        }
-
-        let totalHits = commandHits + signaledPIDs.count
-        statusMessage = totalHits == 0
-            ? "未发现正在运行的 Wine Steam 进程。"
-            : "已关闭 Wine Steam 相关进程（命中 \(totalHits) 项）。"
-        refreshWineSteamRunningState()
+        steamOperations.track(task, for: lease)
     }
 
     func refreshWineSteamRunningState() {
-        let contexts = resolveWineSteamCleanupContexts()
-        isWineSteamRunning = contexts.contains { context in
-            !steamMainClientProcessIDs(openingFilesUnder: context.prefixPath).isEmpty
-        }
+        refreshSteamLibraries()
     }
 
     func applyRecommendedCandidate(_ candidate: ScanCandidate) {
@@ -1183,7 +1261,7 @@ final class AppStore: ObservableObject {
 
     /// 从主页卡片直接启动指定配置，不依赖当前详情页选择。
     func startGame(_ game: GameEntry) {
-        guard permitRuntimeLaunch() else { return }
+        guard permitIndependentRuntimeLaunch() else { return }
         do {
             let log = try GameLauncher.launch(
                 game: game,
@@ -1324,9 +1402,9 @@ final class AppStore: ObservableObject {
                     game.prefixDir = defaultPrefixDir(for: game.name)
                 }
             case .switchEmu:
-                if let rom = result.romURL { game.romPath = rom.path }
-                if let emu = result.emulatorAppURL { game.emulatorAppPath = emu.path }
-                if let script = result.launchScriptURL { game.launchScriptPath = script.path }
+                if game.romPath.isEmpty, let rom = result.romURL { game.romPath = rom.path }
+                if game.emulatorAppPath.isEmpty, let emu = result.emulatorAppURL { game.emulatorAppPath = emu.path }
+                if game.launchScriptPath.isEmpty, let script = result.launchScriptURL { game.launchScriptPath = script.path }
             }
         }
 
@@ -1420,7 +1498,7 @@ final class AppStore: ObservableObject {
                 games[idx].engineHint = "Nintendo Switch"
                 repairedEntry = true
             }
-            if let rom = scan?.romURL, games[idx].romPath != rom.path {
+            if games[idx].romPath.isEmpty, let rom = scan?.romURL {
                 games[idx].romPath = rom.path
                 repairedEntry = true
             }
@@ -1538,18 +1616,18 @@ final class AppStore: ObservableObject {
 
         return SteamLibraryManager.excludingSteamappsURLs(
             urls,
-            under: SteamLibraryManager.macSteamappsURLs(home: Self.storageHome())
+            under: SteamLibraryManager.macSteamappsURLs(home: homeDirectory)
         )
     }
 
     private func isInsideMacSteamLibrary(_ game: SteamLibraryGame) -> Bool {
-        let macSteamappsURLs = SteamLibraryManager.macSteamappsURLs(home: Self.storageHome())
+        let macSteamappsURLs = SteamLibraryManager.macSteamappsURLs(home: homeDirectory)
         let pathsToCheck = [game.steamappsPath, game.installPath, game.manifestPath]
             .filter { !$0.isEmpty }
-            .map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+            .map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().standardizedFileURL.path }
 
         return macSteamappsURLs.contains { steamappsURL in
-            let root = steamappsURL.standardizedFileURL.path
+            let root = steamappsURL.resolvingSymlinksInPath().standardizedFileURL.path
             let prefix = root.hasSuffix("/") ? root : root + "/"
             return pathsToCheck.contains { path in
                 path == root || path.hasPrefix(prefix)
@@ -1557,8 +1635,8 @@ final class AppStore: ObservableObject {
         }
     }
 
-    private func resolveWineSteamCleanupContexts() -> [WineSteamEntryContext] {
-        let home = Self.storageHome()
+    func resolveWineSteamCleanupContexts() -> [WineSteamEntryContext] {
+        let home = homeDirectory
         var candidates: [(steamExe: URL, prefix: URL, source: String)] = [
             (
                 steamExecutableURL(in: steamInstallDir(in: appDataDir.appendingPathComponent("steam-prefix", isDirectory: true))),
@@ -1597,24 +1675,11 @@ final class AppStore: ObservableObject {
             ))
         }
 
-        var seenPrefixes = Set<String>()
-        var contexts: [WineSteamEntryContext] = []
-        for candidate in candidates {
-            let prefixPath = candidate.prefix.standardizedFileURL.path
-            guard fm.fileExists(atPath: prefixPath) || fm.fileExists(atPath: candidate.steamExe.path) else {
-                continue
-            }
-            guard seenPrefixes.insert(prefixPath).inserted else {
-                continue
-            }
-            contexts.append(WineSteamEntryContext(
-                steamExePath: candidate.steamExe.standardizedFileURL.path,
-                prefixPath: prefixPath,
-                sourceLabel: candidate.source
-            ))
-        }
-
-        return contexts
+        return WineSteamCleanupPolicy.contexts(candidates.map {
+            WineSteamEntryContext(steamExePath: $0.steamExe.path,
+                                 prefixPath: $0.prefix.path,
+                                 sourceLabel: $0.source)
+        }, fileManager: fm)
     }
 
     private func steamInstallDir(in prefix: URL) -> URL {
@@ -1661,7 +1726,7 @@ final class AppStore: ObservableObject {
     }
 
     private func existingSteamInstallerURL() -> URL? {
-        let home = Self.storageHome()
+        let home = homeDirectory
         let installerCandidates: [URL] = [
             appDataDir
                 .appendingPathComponent("downloads", isDirectory: true)
@@ -1714,124 +1779,28 @@ final class AppStore: ObservableObject {
         )
     }
 
-    @discardableResult
-    private func runSyncCommand(_ executable: String, arguments: [String], extraEnvironment: [String: String]?) -> Int32 {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-
-        if let extraEnvironment {
-            var env = ProcessInfo.processInfo.environment
-            env.merge(extraEnvironment) { _, new in new }
-            process.environment = env
-        }
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus
-        } catch {
-            return -1
-        }
-    }
-
-    private func runCommandOutput(_ executable: String, arguments: [String], extraEnvironment: [String: String]? = nil) -> String {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-
-        if let extraEnvironment {
-            var env = ProcessInfo.processInfo.environment
-            env.merge(extraEnvironment) { _, new in new }
-            process.environment = env
-        }
-
-        do {
-            try process.run()
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return String(data: data, encoding: .utf8) ?? ""
-        } catch {
-            return ""
-        }
-    }
-
-    private func wineProcessIDs(openingFilesUnder prefixPath: String) -> Set<Int32> {
-        let wineProcessPattern = [
-            "wine",
-            "wineserver",
-            "winedevice",
-            "wineboot\\.exe",
-            "Steam\\.exe",
-            "steamwebhelper\\.exe",
-            "steamservice\\.exe",
-            "steamerrorreporter\\.exe",
-            "gameoverlayui\\.exe",
-            "services\\.exe",
-            "plugplay\\.exe",
-            "svchost\\.exe",
-            "explorer\\.exe",
-            "rpcss\\.exe"
-        ].joined(separator: "|")
-        return processIDs(matching: wineProcessPattern, openingFilesUnder: prefixPath)
-    }
-
-    private func steamClientProcessIDs(openingFilesUnder prefixPath: String) -> Set<Int32> {
-        let steamProcessPattern = [
-            "Steam\\.exe",
-            "steam\\.exe",
-            "steamwebhelper\\.exe",
-            "steamservice\\.exe",
-            "gameoverlayui\\.exe"
-        ].joined(separator: "|")
-        return processIDs(matching: steamProcessPattern, openingFilesUnder: prefixPath)
-    }
-
-    private func steamMainClientProcessIDs(openingFilesUnder prefixPath: String) -> Set<Int32> {
-        processIDs(matching: "Steam\\.exe|steam\\.exe", openingFilesUnder: prefixPath)
-            .filter { pid in
-                let commandLine = runCommandOutput(
-                    "/bin/ps",
-                    arguments: ["-p", "\(pid)", "-o", "args="]
-                )
-                return WineSteamDockReopenPolicy.isSteamMainClientCommandLine(commandLine)
-            }
-    }
-
-    private func requestWineSteamWindowFromDockIfNeeded(activatedPID: Int32) {
+    private func requestWineSteamWindowFromDockIfNeeded(activatedPID: Int32) async {
+        guard !Task.isCancelled, !isSteamLibraryBusy else { return }
         let now = Date()
-        let visibleWindowOwnerPIDs = visibleUserFacingWindowOwnerProcessIDs()
-
+        let visiblePIDs = visibleUserFacingWindowOwnerProcessIDs()
         for context in resolveWineSteamCleanupContexts() {
-            let steamMainClientPIDs = steamMainClientProcessIDs(openingFilesUnder: context.prefixPath)
-            guard steamMainClientPIDs.isEmpty == false else { continue }
-
-            let steamClientPIDs = steamClientProcessIDs(openingFilesUnder: context.prefixPath)
-            guard WineSteamDockReopenPolicy.shouldRequestReopen(
-                activatedPID: activatedPID,
-                steamClientPIDs: steamClientPIDs,
-                steamMainClientPIDs: steamMainClientPIDs,
-                visibleWindowOwnerPIDs: visibleWindowOwnerPIDs,
-                now: now,
-                lastRequestAt: lastWineSteamWindowReopenRequestAt
-            ) else {
-                continue
-            }
-
+            let pids = await Task.detached(priority: .utility) {
+                (WineSteamProcessService.mainClientPIDs(in: context.prefixPath),
+                 WineSteamProcessService.clientPIDs(in: context.prefixPath))
+            }.value
+            guard !Task.isCancelled, !isSteamLibraryBusy else { return }
+            guard WineSteamDockReopenPolicy.shouldRequestReopen(activatedPID: activatedPID,
+                steamClientPIDs: pids.1, steamMainClientPIDs: pids.0,
+                visibleWindowOwnerPIDs: visiblePIDs, now: now,
+                lastRequestAt: lastWineSteamWindowReopenRequestAt) else { continue }
+            guard let lease = beginSteamOperation(.launching) else { return }
+            if let task = wineSteamDockActivationTask { steamOperations.track(task, for: lease) }
+            defer { finishSteamOperation(lease) }
             lastWineSteamWindowReopenRequestAt = now
-            _ = launchWineSteam(
-                extraArguments: [WineSteamDockReopenPolicy.showMainWindowURL],
+            _ = await launchWineSteam(extraArguments: [WineSteamDockReopenPolicy.showMainWindowURL],
                 successMessage: "已通过程序坞请求重新显示 Wine Steam 主窗口。",
                 missingSteamMessage: "未找到当前程序坞图标所属的 Wine Steam。",
-                allowInstallerFallback: false,
-                contextOverride: context
-            )
-            refreshWineSteamRunningState()
+                allowInstallerFallback: false, contextOverride: context)
             return
         }
     }
@@ -1867,89 +1836,6 @@ final class AppStore: ObservableObject {
             result.insert(ownerPID)
         }
         return result
-    }
-
-    /// 先按 Wine/Windows 进程命令筛选，再用 lsof 限定到游戏安装目录，避免把 Steam
-    /// 客户端或其他 Wine 游戏误判为本次启动成功。
-    private func wineGameProcessIDs(_ game: SteamLibraryGame, in context: WineSteamEntryContext) -> Set<Int32> {
-        guard !game.installPath.isEmpty, fm.fileExists(atPath: game.installPath) else { return [] }
-        let candidates = processIDs(
-            matching: "wine|Wine|\\.exe|\\.EXE",
-            openingFilesUnder: game.installPath
-        )
-        return candidates.subtracting(steamClientProcessIDs(openingFilesUnder: context.prefixPath))
-    }
-
-    private func wineSteamShellProcessIDs(openingFilesUnder prefixPath: String) -> Set<Int32> {
-        let shellProcessPattern = [
-            "wineserver",
-            "winedevice",
-            "wineboot\\.exe",
-            "services\\.exe",
-            "plugplay\\.exe",
-            "svchost\\.exe",
-            "explorer\\.exe",
-            "rpcss\\.exe"
-        ].joined(separator: "|")
-        return processIDs(matching: shellProcessPattern, openingFilesUnder: prefixPath)
-    }
-
-    private func clearStaleWineSteamShellProcesses(openingFilesUnder prefixPath: String) -> Int {
-        let shellPIDs = wineSteamShellProcessIDs(openingFilesUnder: prefixPath)
-        guard !shellPIDs.isEmpty else { return 0 }
-
-        let termHits = signalProcessIDs(shellPIDs, signal: "TERM")
-        Thread.sleep(forTimeInterval: 0.2)
-        let remainingPIDs = wineSteamShellProcessIDs(openingFilesUnder: prefixPath)
-        let killHits = signalProcessIDs(remainingPIDs, signal: "KILL")
-        return termHits + killHits
-    }
-
-    private func processIDs(matching pattern: String, openingFilesUnder prefixPath: String) -> Set<Int32> {
-        let normalizedPrefix = URL(fileURLWithPath: prefixPath, isDirectory: true).standardizedFileURL.path
-        guard !normalizedPrefix.isEmpty else { return [] }
-
-        let candidatesOutput = runCommandOutput("/usr/bin/pgrep", arguments: ["-f", pattern])
-        let ownPID = ProcessInfo.processInfo.processIdentifier
-        let candidatePIDs = candidatesOutput
-            .split(whereSeparator: \.isNewline)
-            .compactMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-            .filter { $0 != ownPID }
-
-        var matches = Set<Int32>()
-        for pid in candidatePIDs {
-            let filesOutput = runCommandOutput("/usr/sbin/lsof", arguments: ["-nP", "-Fn", "-p", "\(pid)"])
-            let prefixToken = "n\(normalizedPrefix)"
-            let opensPrefix = filesOutput
-                .split(whereSeparator: \.isNewline)
-                .contains { line in
-                    line == prefixToken || line.hasPrefix(prefixToken + "/")
-                }
-            if opensPrefix {
-                matches.insert(pid)
-            }
-        }
-
-        return matches
-    }
-
-    @discardableResult
-    private func signalProcessIDs(_ pids: Set<Int32>, signal: String) -> Int {
-        var hits = 0
-        for pid in pids.sorted() {
-            if runSyncCommand("/bin/kill", arguments: ["-\(signal)", "\(pid)"], extraEnvironment: nil) == 0 {
-                hits += 1
-            }
-        }
-        return hits
-    }
-
-    private func resolveWineserverPath(fromWineBinary wineBinaryPath: String) -> String? {
-        let candidate = URL(fileURLWithPath: wineBinaryPath)
-            .deletingLastPathComponent()
-            .appendingPathComponent("wineserver")
-            .path
-        return fm.isExecutableFile(atPath: candidate) ? candidate : nil
     }
 
     private func isURL(_ child: URL, inside parent: URL) -> Bool {
