@@ -106,7 +106,7 @@ final class UpdateInstallationGate: ObservableObject {
     func disarm() { installationPending = false }
 
     func allowInstallation() async -> Bool {
-        guard !isChecking else { return false }
+        guard !isChecking, !Task.isCancelled else { return false }
         isChecking = true
         defer { isChecking = false }
         let paths = roots().filter { !$0.isEmpty }.map {
@@ -115,15 +115,17 @@ final class UpdateInstallationGate: ObservableObject {
         do {
             guard !paths.isEmpty else { throw UpdateSafetyError.probeFailed("更新配置尚未就绪。") }
             let activities = try await probe(paths)
+            guard !Task.isCancelled else { return false }
             if !activities.isEmpty {
-                reportProblem("更新已暂缓", "请先保存并退出相关游戏或 Wine Steam，再继续更新。\n" +
+                reportProblem("更新已暂缓", "请先保存并退出相关游戏或 Wine Steam，再点击 Shiori 主窗口的“重启以更新”，或从菜单选择“检查更新…”继续。\n" +
                     activities.map { "\($0.name)（PID \($0.pid)）" }.joined(separator: "\n"))
                 return false
             }
             try saveBeforeExit()
             return true
         } catch {
-            reportProblem("暂时无法安装更新", error.localizedDescription)
+            guard !Task.isCancelled else { return false }
+            reportProblem("暂时无法安装更新", error.localizedDescription + "\n问题解决后，请点击 Shiori 主窗口的“重启以更新”，或从菜单选择“检查更新…”重试。")
             return false
         }
     }

@@ -1,6 +1,6 @@
 {
-  "build": 10,
-  "version": "0.2.4",
-  "notes": "加强 Steam 文件与 Switch 导入保护，修复多库启动和更新状态问题，改进后台扫描与操作互斥，优化了部分 UI。",
+  "build": 11,
+  "version": "0.2.5",
+  "notes": "修复点击“安装并重启应用”后更新未继续的问题，完善安装前安全检查、失败重试和重复操作保护。",
   "url": "https://github.com/jojocys/Shiori/releases/latest"
 }

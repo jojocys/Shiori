@@ -99,6 +99,8 @@ final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @prec
     private var controller: SPUStandardUpdaterController?
     private var observation: NSKeyValueObservation?
     private var resumeInstallation: (() -> Void)?
+    private var installationAttempt: UUID?
+    private var installationTask: Task<Void, Never>?
     private var availableUpdateVersion: String?
     private var automaticCheckTask: Task<Void, Never>?
     private var stateTask: Task<Void, Never>?
@@ -108,6 +110,7 @@ final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @prec
     private let updateDefaults: UserDefaults
     private let currentDate: () -> Date
     private let silentCheckScheduler: ((TimeInterval) -> Void)?
+    private let installationGate: UpdateInstallationGate
 
     @Published private(set) var canCheckForUpdates = true
     @Published private(set) var toolbarState: UpdateToolbarState = .idle
@@ -117,6 +120,7 @@ final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @prec
         updateDefaults = .standard
         currentDate = Date.init
         silentCheckScheduler = nil
+        installationGate = .shared
         super.init()
         guard Bundle.main.bundleURL.pathExtension == "app",
               Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") is String,
@@ -143,17 +147,20 @@ final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @prec
          initialState: UpdateToolbarState = .idle,
          defaults: UserDefaults,
          now: @escaping () -> Date,
-         scheduleSilentCheck: @escaping (TimeInterval) -> Void) {
+         scheduleSilentCheck: @escaping (TimeInterval) -> Void,
+         installationGate: UpdateInstallationGate? = nil) {
         self.informationClient = informationClient
         updateDefaults = defaults
         currentDate = now
         silentCheckScheduler = scheduleSilentCheck
+        self.installationGate = installationGate ?? .shared
         super.init()
         toolbarState = initialState
         canCheckForUpdates = informationClient.canCheckForUpdates
     }
 
     deinit {
+        installationTask?.cancel()
         automaticCheckTask?.cancel()
         stateTask?.cancel()
         toastTask?.cancel()
@@ -299,7 +306,7 @@ final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @prec
     }
 
     func updater(_ updater: SPUUpdater, willExtractUpdate item: SUAppcastItem) {
-        UpdateInstallationGate.shared.arm()
+        installationGate.arm()
         transition(to: .downloading)
     }
 
@@ -313,24 +320,54 @@ final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @prec
 
     func updater(_ updater: SPUUpdater, shouldPostponeRelaunchForUpdate item: SUAppcastItem,
                  untilInvokingBlock installHandler: @escaping () -> Void) -> Bool {
-        UpdateInstallationGate.shared.arm()
+        postponeInstallation(untilInvoking: installHandler)
+    }
+
+    /// Shared by Sparkle's one-shot Install button and headless regression tests.
+    func postponeInstallation(untilInvoking installHandler: @escaping () -> Void) -> Bool {
+        cancelInstallationAttempt()
+        installationGate.arm()
         resumeInstallation = installHandler
         transition(to: .downloaded)
+        // Sparkle's standard button consumes its callback on the first click.
+        // Defer until this delegate returns, then complete our safety checks
+        // and invoke the saved handler without requiring another UI action.
+        continueInstallation()
         return true
     }
 
     private func continueInstallation() {
-        guard resumeInstallation != nil, !UpdateInstallationGate.shared.isChecking else { return }
-        Task {
-            if await UpdateInstallationGate.shared.allowInstallation(), let resume = resumeInstallation {
-                resumeInstallation = nil
+        guard resumeInstallation != nil, installationAttempt == nil else { return }
+        let attempt = UUID()
+        installationAttempt = attempt
+        let gate = installationGate
+        installationTask = Task { [weak self] in
+            // A pending Quit may already be inspecting activity. Wait for that
+            // bounded check rather than dropping the one-shot Install request.
+            while gate.isChecking {
+                guard !Task.isCancelled, self?.installationAttempt == attempt else { return }
+                do { try await Task.sleep(for: .milliseconds(25)) } catch { return }
+            }
+            guard !Task.isCancelled, self?.installationAttempt == attempt else { return }
+            let allowed = await gate.allowInstallation()
+            guard let self, !Task.isCancelled, self.installationAttempt == attempt else { return }
+            self.installationAttempt = nil
+            self.installationTask = nil
+            if allowed, let resume = self.resumeInstallation {
+                self.resumeInstallation = nil
                 resume()
             } else {
                 // Failed safety checks deliberately leave the restart action visible.
-                toolbarState = .downloaded
-                canCheckForUpdates = true
+                self.toolbarState = .downloaded
+                self.canCheckForUpdates = true
             }
         }
+    }
+
+    private func cancelInstallationAttempt() {
+        installationTask?.cancel()
+        installationTask = nil
+        installationAttempt = nil
     }
 
     func updater(_ updater: SPUUpdater, failedToDownloadUpdate item: SUAppcastItem, error: Error) {
@@ -338,9 +375,24 @@ final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @prec
     }
 
     func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        handleUpdateAbort(error)
+    }
+
+    func handleUpdateAbort(_ error: Error) {
         let nsError = error as NSError
         if nsError.domain == SUSparkleErrorDomain && nsError.code == 1_001 {
             if toolbarState != .hidden && toolbarState != .upToDate { showUpToDateThenHide() }
+            return
+        }
+        if resumeInstallation != nil || installationAttempt != nil || toolbarState.isDownloaded {
+            // A genuine session abort invalidates Sparkle's continuation. An
+            // unrelated informational failure still preserves a staged update.
+            cancelInstallationAttempt()
+            resumeInstallation = nil
+            installationGate.disarm()
+            stateTask?.cancel()
+            toolbarState = .failed
+            showToast(.failed, duration: .milliseconds(1_600))
             return
         }
         showFailureUnlessInstallationIsReady()
@@ -348,8 +400,9 @@ final class ShioriUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @prec
 
     private func showFailureUnlessInstallationIsReady() {
         guard !toolbarState.isDownloaded else { return }
+        cancelInstallationAttempt()
         resumeInstallation = nil
-        UpdateInstallationGate.shared.disarm()
+        installationGate.disarm()
         transition(to: .failed)
         showToast(.failed, duration: .milliseconds(1_600))
     }
