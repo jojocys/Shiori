@@ -37,7 +37,7 @@ struct ShioriApp: App {
                     store.startGame()
                 }
                 .keyboardShortcut(.return, modifiers: [.command])
-                .disabled(store.isSteamLibraryBusy)
+                .disabled(store.isSteamLibraryBusy || store.selectedGame.map { store.isStartingGame($0) } == true)
             }
 
             CommandGroup(after: .appInfo) {

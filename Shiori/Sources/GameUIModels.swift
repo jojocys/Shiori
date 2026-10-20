@@ -28,6 +28,14 @@ struct GameNameDraft {
 
 /// Cards and previews share one revision for the same artwork.
 enum GameArtworkIdentity {
+    /// Stable across display-name edits; a different file or manual icon must
+    /// not inherit the previous configuration's image while loading.
+    static func source(for game: GameEntry) -> String {
+        let fields = [game.id.uuidString, game.iconPath, game.exePath, game.romPath,
+                      game.launchScriptPath, game.gameFolderPath, game.platform.rawValue]
+        return fields.map { "\($0.utf8.count):\($0)" }.joined()
+    }
+
     static func revision(for game: GameEntry) -> String {
         let fields = ["game", game.id.uuidString, game.iconPath, game.exePath,
                       game.romPath, game.launchScriptPath, game.gameFolderPath,

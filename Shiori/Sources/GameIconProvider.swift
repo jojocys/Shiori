@@ -318,21 +318,23 @@ enum RemoteIconCache {
             .appendingPathComponent(".shiori/icons/cache", isDirectory: true)
     }
 
-    static func fileURL(_ key: String) -> URL { dir.appendingPathComponent(key + ".img") }
+    static func fileURL(_ key: String, directory: URL? = nil) -> URL {
+        (directory ?? dir).appendingPathComponent(key + ".img")
+    }
 
-    static func read(_ key: String) -> Data? {
-        let url = fileURL(key)
+    static func read(_ key: String, directory: URL? = nil) -> Data? {
+        let url = fileURL(key, directory: directory)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         return try? Data(contentsOf: url)
     }
 
-    static func write(_ data: Data, key: String) {
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try? data.write(to: fileURL(key), options: .atomic)
+    static func write(_ data: Data, key: String, directory: URL? = nil) {
+        try? FileManager.default.createDirectory(at: directory ?? dir, withIntermediateDirectories: true)
+        try? data.write(to: fileURL(key, directory: directory), options: .atomic)
     }
 
-    static func clear(_ key: String) {
-        try? FileManager.default.removeItem(at: fileURL(key))
+    static func clear(_ key: String, directory: URL? = nil) {
+        try? FileManager.default.removeItem(at: fileURL(key, directory: directory))
     }
 }
 
@@ -467,9 +469,9 @@ enum GameIconResolver {
     private static let preferredNames = ["icon", "cover", "logo", "title", "package", "jacket", "poster", "banner", "app", "game", "favicon", "thumbnail", "表紙", "ジャケ"]
 
     /// 主入口：返回可被 NSImage 解析的图片数据（在主线程构建 NSImage）。
-    static func iconData(for game: GameEntry) async -> Data? {
+    static func iconData(for game: GameEntry, cacheDirectory: URL? = nil, online: Bool? = nil) async -> Data? {
         if let manual = await offMain({ manualIconData(game) }) { return manual }
-        if let cover = await remoteCoverData(for: game) { return cover }
+        if let cover = await remoteCoverData(for: game, cacheDirectory: cacheDirectory, online: online) { return cover }
         if let local = await offMain({ localIconData(game) }) { return local }
         return nil
     }
@@ -523,23 +525,44 @@ enum GameIconResolver {
         "name-" + TitleMatch.stableHash(TitleMatch.normalize(candidate))
     }
 
-    private static func remoteCoverData(for game: GameEntry) async -> Data? {
+    static func persistentCoverKey(for game: GameEntry) -> String {
+        "game-" + game.id.uuidString + "-" + TitleMatch.stableHash(GameArtworkIdentity.source(for: game))
+    }
+
+    /// Migrate by copying a legacy name cache, never deleting or renaming the
+    /// old file. Called before a display-name edit even if no view loaded yet.
+    static func preserveCachedCover(for game: GameEntry, cacheDirectory: URL? = nil) {
+        _ = cachedCover(for: game, cacheDirectory: cacheDirectory)
+    }
+
+    private static func cachedCover(for game: GameEntry, cacheDirectory: URL?) -> Data? {
+        let stableKey = persistentCoverKey(for: game)
+        if let cached = RemoteIconCache.read(stableKey, directory: cacheDirectory) { return cached }
+        for candidate in identityCandidates(for: game) {
+            if let cached = RemoteIconCache.read(cacheKey(candidate), directory: cacheDirectory) {
+                RemoteIconCache.write(cached, key: stableKey, directory: cacheDirectory)
+                return cached
+            }
+        }
+        return nil
+    }
+
+    private static func remoteCoverData(for game: GameEntry, cacheDirectory: URL?, online: Bool?) async -> Data? {
+        if let cached = cachedCover(for: game, cacheDirectory: cacheDirectory) { return cached }
         let candidates = identityCandidates(for: game)
         guard let primary = candidates.first else { return nil }
-        // 任一候选命中磁盘缓存即返回（离线可用）。
-        for cand in candidates {
-            if let cached = RemoteIconCache.read(cacheKey(cand)) { return cached }
-        }
-        guard onlineCoverEnabled else { return nil }
+        guard online ?? onlineCoverEnabled else { return nil }
         let primaryKey = cacheKey(primary)
         if await NegativeCoverCache.shared.contains(primaryKey) { return nil }
 
         await CoverFetchGate.shared.acquire()
         let (cover, sawNetworkError) = await fetchCover(candidates: candidates)
         await CoverFetchGate.shared.release()
+        guard !Task.isCancelled else { return nil }
 
         if let cover {
-            RemoteIconCache.write(cover, key: primaryKey)
+            RemoteIconCache.write(cover, key: primaryKey, directory: cacheDirectory)
+            RemoteIconCache.write(cover, key: persistentCoverKey(for: game), directory: cacheDirectory)
             return cover
         }
         // 仅在“服务器答复了但确无匹配”时毒化负缓存；网络/限流失败留待下次重试。
@@ -569,10 +592,11 @@ enum GameIconResolver {
     }
 
     /// 清掉某游戏的在线缓存与负缓存（“重新获取封面”用）。
-    static func clearRemoteCache(for game: GameEntry) {
+    static func clearRemoteCache(for game: GameEntry, cacheDirectory: URL? = nil) {
+        RemoteIconCache.clear(persistentCoverKey(for: game), directory: cacheDirectory)
         for cand in identityCandidates(for: game) {
             let key = cacheKey(cand)
-            RemoteIconCache.clear(key)
+            RemoteIconCache.clear(key, directory: cacheDirectory)
             Task { await NegativeCoverCache.shared.remove(key) }
         }
     }
@@ -642,6 +666,7 @@ struct GameIconView: View {
     var dim: Double = 0.32          // 方案 B 背景压暗强度
 
     @State private var image: NSImage?
+    @State private var displayedSource: String?
 
     private var signature: String {
         GameArtworkIdentity.revision(for: game)
@@ -715,13 +740,15 @@ struct GameIconView: View {
     }
 
     private func load() async {
-        image = nil
         let snapshot = game
+        let source = GameArtworkIdentity.source(for: snapshot)
+        if displayedSource != source { image = nil }
+        displayedSource = source
         let result = await GameArtworkLoader.load(revision: signature) {
             await GameIconResolver.iconData(for: snapshot)
         }
         guard !Task.isCancelled else { return }
-        image = result.image
+        if let replacement = result.image { image = replacement }
     }
 }
 

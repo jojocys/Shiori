@@ -29,7 +29,7 @@ enum GameLauncherError: LocalizedError {
 enum GameLauncher {
     /// 统一入口：按平台路由。Windows 走 Wine（默认核心，体验不变）；Switch 才跳出 Wine 走原生模拟器。
     static func launch(game: GameEntry, logsDir: URL, preferredWineBinaryPath: String,
-                       switchKeysPath: String = "", switchFirmwarePath: String = "", switchDataDir: URL? = nil) throws -> URL {
+                       switchKeysPath: String = "", switchFirmwarePath: String = "", switchDataDir: URL? = nil) throws -> GameLaunchResult {
         switch game.platform {
         case .windows:
             return try launchWindows(game: game, logsDir: logsDir, preferredWineBinaryPath: preferredWineBinaryPath)
@@ -38,7 +38,7 @@ enum GameLauncher {
         }
     }
 
-    private static func launchWindows(game: GameEntry, logsDir: URL, preferredWineBinaryPath: String) throws -> URL {
+    private static func launchWindows(game: GameEntry, logsDir: URL, preferredWineBinaryPath: String) throws -> GameLaunchResult {
         guard let exeURL = game.exeURL else { throw GameLauncherError.gameNotConfigured }
         guard let folderURL = game.folderURL else { throw GameLauncherError.gameFolderMissing }
         let fm = FileManager.default
@@ -98,6 +98,9 @@ enum GameLauncher {
         env["WINEDEBUG"] = "-all"
         env["LANG"] = locale
         env["LC_ALL"] = locale
+        if let identity = IndependentGameIdentity(game) {
+            env[IndependentGameIdentity.environmentKey] = identity.token
+        }
         if let adapter = WineDockIcons.adapter {
             let manifest = try? WineDockIcons.prepare(prefix: prefixURL,
                 gameExecutables: [exeURL],
@@ -110,7 +113,7 @@ enum GameLauncher {
         process.terminationHandler = { _ in try? fileHandle.close() }
 
         try process.run()
-        return logURL
+        return GameLaunchResult(logURL: logURL, process: process)
     }
 
     private static func windowsDriveCPath(for url: URL, prefixURL: URL) -> String? {
@@ -133,7 +136,7 @@ enum GameLauncher {
     }
 
     /// Switch：优先复刻游戏夹里的现成一键脚本（兼容任意模拟器/参数/汉化设置）；否则通用 open -n。
-    private static func launchSwitch(game: GameEntry, logsDir: URL, keysPath: String, firmwarePath: String, dataDir: URL?) throws -> URL {
+    private static func launchSwitch(game: GameEntry, logsDir: URL, keysPath: String, firmwarePath: String, dataDir: URL?) throws -> GameLaunchResult {
         let fm = FileManager.default
         try? fm.createDirectory(at: logsDir, withIntermediateDirectories: true)
         let logURL = logsDir.appendingPathComponent(logFileName(for: game))
@@ -207,14 +210,14 @@ enum GameLauncher {
         } catch {
             throw GameLauncherError.switchLaunchFailed
         }
-        return logURL
+        return GameLaunchResult(logURL: logURL, process: process)
     }
 
     private static func logFileName(for game: GameEntry) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         let safe = game.name.replacingOccurrences(of: "/", with: "_")
-        return "\(safe)-\(formatter.string(from: Date())).log"
+        return "\(safe)-\(formatter.string(from: Date()))-\(UUID().uuidString.prefix(8)).log"
     }
 
     static func resolvedLocale(for game: GameEntry) -> String {

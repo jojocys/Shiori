@@ -824,7 +824,7 @@ struct RootView: View {
             .buttonStyle(.borderedProminent)
             .tint(configured ? .green : .secondary)
             .controlSize(.small)
-            .disabled(!configured || store.isSteamLibraryBusy)
+            .disabled(!configured || store.isSteamLibraryBusy || store.isStartingGame(game))
             .help(configured ? "直接启动该游戏" : "点击卡片进入配置页并完成设置")
             .padding(14)
         }
@@ -990,7 +990,7 @@ struct RootView: View {
                 .tint(.green)
                 .controlSize(.large)
                 .keyboardShortcut(.return, modifiers: [.command])
-                .disabled(game == nil || store.isSteamLibraryBusy)
+                .disabled(game == nil || store.isSteamLibraryBusy || game.map { store.isStartingGame($0) } == true)
 
                 HStack(spacing: 8) {
                     Button {

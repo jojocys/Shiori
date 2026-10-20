@@ -157,6 +157,17 @@ enum WineSteamProcessService {
             .subtracting(clientPIDs(in: context.prefixPath))
     }
 
+    static func independentGamePIDsResult(executable: String, prefix: String) -> Set<Int32>? {
+        guard FileManager.default.fileExists(atPath: prefix),
+              FileManager.default.fileExists(atPath: executable) else { return [] }
+        guard let candidates = processIDsResult(matching: "wine|\\.exe", openingFilesUnder: prefix) else { return nil }
+        guard !candidates.isEmpty else { return [] }
+        let result = execute(executable: "/usr/sbin/lsof",
+            args: ["-nP", "-Fpn", "-p", candidates.sorted().map(String.init).joined(separator: ",")])
+        guard result.exitCode == 0, !result.timedOut, !result.outputTruncated else { return nil }
+        return processIDs(openFilesOutput: result.output, candidates: candidates, prefix: executable)
+    }
+
     static func clearStaleShell(in prefix: String) -> Int {
         guard let clients = mainClientPIDsResult(in: prefix), clients.isEmpty,
               let planned = processIDsResult(matching: "wineserver|winedevice|wineboot\\.exe|services\\.exe|plugplay\\.exe|svchost\\.exe|explorer\\.exe|rpcss\\.exe", openingFilesUnder: prefix),

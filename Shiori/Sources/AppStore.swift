@@ -55,6 +55,13 @@ final class AppStore: ObservableObject {
     }
     private var wineSteamDockActivationTask: Task<Void, Never>?
     private var lastWineSteamWindowReopenRequestAt: Date?
+    @Published private(set) var startingIndependentGames: Set<IndependentGameIdentity> = []
+    private var independentGameProcesses: [IndependentGameIdentity: Process] = [:]
+    var independentGameProbe: @Sendable (IndependentGameIdentity) async throws -> Bool = { identity in
+        try await Task.detached(priority: .utility) { try IndependentGameProcessProbe.isRunning(identity) }.value
+    }
+    /// Injected only by headless tests; normal launches always use GameLauncher.
+    var independentGameLauncher: ((GameEntry) throws -> GameLaunchResult)?
 
     let appDataDir: URL
     let logsDir: URL
@@ -495,7 +502,7 @@ final class AppStore: ObservableObject {
     /// 重新获取在线封面：清掉该游戏的在线缓存，抬高 updatedAt 触发 GameIconView 重新解析。
     func refetchIconForSelectedGame() {
         guard let game = selectedGame else { return }
-        GameIconResolver.clearRemoteCache(for: game)
+        GameIconResolver.clearRemoteCache(for: game, cacheDirectory: iconsDir.appendingPathComponent("cache"))
         touchSelected()
         statusMessage = "正在重新获取封面…"
     }
@@ -546,6 +553,7 @@ final class AppStore: ObservableObject {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let committed = trimmed.isEmpty ? "未命名游戏" : trimmed
         guard let index = games.firstIndex(where: { $0.id == id }), games[index].name != committed else { return }
+        GameIconResolver.preserveCachedCover(for: games[index], cacheDirectory: iconsDir.appendingPathComponent("cache"))
         games[index].name = committed
         games[index].updatedAt = Date()
         save()
@@ -1262,16 +1270,73 @@ final class AppStore: ObservableObject {
     /// 从主页卡片直接启动指定配置，不依赖当前详情页选择。
     func startGame(_ game: GameEntry) {
         guard permitIndependentRuntimeLaunch() else { return }
+        guard game.platform == .windows else {
+            performGameLaunch(game)
+            return
+        }
+        guard let identity = IndependentGameIdentity(game) else {
+            statusMessage = "启动失败：请先配置主程序和 Wine Prefix。"
+            return
+        }
+        guard !startingIndependentGames.contains(identity) else {
+            statusMessage = "正在启动：\(game.name)，请稍候。"
+            return
+        }
+        guard independentGameProcesses[identity]?.isRunning != true else {
+            statusMessage = "\(game.name) 已在运行。"
+            return
+        }
+        // Reserve before the first await, across detail, menu and home actions.
+        startingIndependentGames.insert(identity)
+        let probe = independentGameProbe
+        Task { [weak self] in
+            do {
+                let running = try await probe(identity)
+                guard let self else { return }
+                defer { self.startingIndependentGames.remove(identity) }
+                guard !Task.isCancelled else { return }
+                if running {
+                    self.statusMessage = "\(game.name) 已在运行。"
+                    return
+                }
+                guard self.permitIndependentRuntimeLaunch() else { return }
+                guard let current = self.games.first(where: { $0.id == game.id }),
+                      IndependentGameIdentity(current) == identity else {
+                    self.statusMessage = "配置已更改，已取消旧的启动请求。"
+                    return
+                }
+                self.independentGameProcesses.removeValue(forKey: identity)
+                self.performGameLaunch(current, identity: identity)
+            } catch {
+                guard let self else { return }
+                self.startingIndependentGames.remove(identity)
+                self.statusMessage = "启动已暂缓：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    func isStartingGame(_ game: GameEntry) -> Bool {
+        IndependentGameIdentity(game).map { startingIndependentGames.contains($0) } ?? false
+    }
+
+    private func performGameLaunch(_ game: GameEntry, identity: IndependentGameIdentity? = nil) {
         do {
-            let log = try GameLauncher.launch(
-                game: game,
-                logsDir: logsDir,
-                preferredWineBinaryPath: preferredWineBinaryPath,
-                switchKeysPath: preferredKeysPath,
-                switchFirmwarePath: preferredFirmwarePath,
-                switchDataDir: appDataDir.appendingPathComponent("switch-data", isDirectory: true)
-            )
-            lastLogPath = log.path
+            let result: GameLaunchResult
+            if let identity, let independentGameLauncher {
+                result = try independentGameLauncher(game)
+                independentGameProcesses[identity] = result.process
+            } else {
+                result = try GameLauncher.launch(
+                    game: game,
+                    logsDir: logsDir,
+                    preferredWineBinaryPath: preferredWineBinaryPath,
+                    switchKeysPath: preferredKeysPath,
+                    switchFirmwarePath: preferredFirmwarePath,
+                    switchDataDir: appDataDir.appendingPathComponent("switch-data", isDirectory: true)
+                )
+                if let identity { independentGameProcesses[identity] = result.process }
+            }
+            lastLogPath = result.logURL.path
             statusMessage = "已尝试启动：\(game.name)"
             if let index = games.firstIndex(where: { $0.id == game.id }) {
                 games[index].updatedAt = Date()
